@@ -305,7 +305,9 @@ export class ChunkedUrbanLayer {
        normal/roughness/AO 走原生 JPG（webp 在软渲染后端会死黑，已验证两次）。 */
     const TL = new THREE.TextureLoader();
     const tex = (f, srgb) => {
-      const t = TL.load('./textures/real/' + f);
+      // [缓存修复] 贴图内容变了但同名，服务端 max-age 86400 会让手机一直拿旧图。
+      // 加版本号强制刷新；以后改图只改这个常量。
+      const t = TL.load('./textures/real/' + f + '?v=20261126f');
       t.wrapS = t.wrapT = THREE.RepeatWrapping;
       t.anisotropy = 8;
       if (srgb) t.colorSpace = THREE.SRGBColorSpace;
