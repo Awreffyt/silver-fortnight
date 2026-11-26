@@ -127,10 +127,10 @@ const PERF = (() => {
     // [2026-11-26 iPhone XR 卡崩修复] 2.0×DPR 在 2x 屏等于渲染 4 倍像素
     // （828×1792 CSS → 1656×3584），A12 fragment 直接饱和；配合已关的 POM，
     // DPR 降到 1.15 仍清晰（烘焙法线保立体感），像素量减少约 3 倍。cull 同步收紧。
-    mobile:    { composer: false, bloom: false, dprCap: 1.15, cull: 700,  shadows: false, msaa: false },
+    mobile:    { composer: false, bloom: false, dprCap: 1.15, cull: 1100, shadows: false, msaa: false },  // [2026-11-26 城市空修复] 700把真实城市圈(1208m)砍掉4成→视野外全是空地; 远景走AABB代理成本极低,拉回1100
     // 低端机（deviceMemory < 4）：DPR 再降，剔除半径收紧
     // [a7i] 0.85 → 1.0：0.85 在 3x 屏上等于整屏糊一层灰，低端机也至少要 1:1 像素。
-    mobileLow: { composer: false, bloom: false, dprCap: 1.0, cull: 320, shadows: false, msaa: false },
+    mobileLow: { composer: false, bloom: false, dprCap: 1.0, cull: 620, shadows: false, msaa: false },  // [同上] 320几乎贴脸,拉到620保底城市感
   }[tier];
   return Object.assign({ tier, isMobileUA }, P);
 })();
@@ -1366,7 +1366,7 @@ function releaseTextureSources() {
 }
 
 const scene = new THREE.Scene();
-scene.fog = new THREE.FogExp2(0x454c56, 0.00085);
+scene.fog = new THREE.FogExp2(0xc3d4e2, 0.00052);  // [2026-11-26 雾蒙蒙修复] 灰蓝0.00085在600m就有23%灰罩、1200m 65% → 换迈阿密亮天色、密度降4成，远处淡入天空而非糊一层灰
 
 const camera = new THREE.PerspectiveCamera(75, innerWidth / innerHeight, 0.3, PERF.isMobileUA ? 800 : 9000);
 // 锁定水平 FOV：横屏（宽画幅）时若沿用 75° 纵向视角，水平视角会被拉到 120°+，
