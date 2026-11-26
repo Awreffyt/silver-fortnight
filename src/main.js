@@ -557,7 +557,9 @@ const TEX_FAR_SIDE  = () => (IS_MOBILE ? Math.min(256, TEX_MAX || 256) : 0);
 /** 地面类贴图：整片平铺、视角永远贴着地面 → 永远给最高清，不参与距离降档 */
 const GROUND_TEX_RE = /(Asphalt|Sidewalk|Pavement|Brick|Tile|Floor|Ground|Curbstone|Road_)/i;
 // [2026-11-17a6] 建筑立面高频贴图：楼体玩家随时贴脸看，建场即按近景档（不再"先糊后清"）
-const FACADE_TEX_RE = /(Skyscraper|Windows_|Wall_Panel|Plaster|Trim_Sheet|Concrete_0|Brick_Wall|Asian_Shop|Slums_Pack|Metal_Panel|Glass_Showcase|Roller_Shutters|Column_Concrete|Wall_Interior|Quadron)/i;
+// [2026-11-26 修复] 把 ambientCG 摄影立面 acg_* 纳入高清通道：此前它们不匹配旧立面正则，
+// 被当普通贴图近景只给 512、远景 256 → 窗格糊成马赛克。纳入后近景 1024、中景 512。
+const FACADE_TEX_RE = /(Skyscraper|Windows_|Wall_Panel|Plaster|Trim_Sheet|Concrete_0|Brick_Wall|Asian_Shop|Slums_Pack|Metal_Panel|Glass_Showcase|Roller_Shutters|Column_Concrete|Wall_Interior|Quadron|acg_Facade|acg_.*Facade|_Color\.jpg)/i;
 // 核心中的核心：2x 超分到 2048 的 4 张（占屏幕面积最大的窗户与楼体）。每张 GL 驻留 22MB，4 张 90MB —— 超过这个数预算必爆
 const TEX_2048_RE = /(Windows_01|Windows_02|Skyscraper_01|Skyscraper_02)/i;
 const TEX_2048_SIDE = () => (IS_MOBILE ? Math.min(2048, TEX_SAFE_MAX || 2048) : 0);
@@ -1522,14 +1524,14 @@ const pmrem = new THREE.PMREMGenerator(renderer);
 }
 
 // ---------- lights (driven by the sky preset) ----------
-const hemi = new THREE.HemisphereLight(0x9aa6b4, 0x2a2622, 1.3);
+const hemi = new THREE.HemisphereLight(0xcfd2d4, 0x2a2622, 1.3);
 // [2026-11-17a4] 手机端补一盏弱环境光：沥青路面反照率只有 0.06~0.1，仅靠半球光
 // 在 dusk/night 下就是一片纯黑（用户反馈的「地面是黑的」）。0.55 的均匀环境光
 // 能把路面从 8/255 抬到 25/255 左右，同时不破坏夜景对比（桌面端不加，保持原设定）。
-const mobileAmbient = new THREE.AmbientLight(0x9aa6b8, IS_MOBILE ? 1.05 : 0);
+const mobileAmbient = new THREE.AmbientLight(0xd8d2c6, IS_MOBILE ? 1.05 : 0);
 scene.add(mobileAmbient);
 scene.add(hemi);
-const sun = new THREE.DirectionalLight(0xcfd8e4, 0.55);
+const sun = new THREE.DirectionalLight(0xfff4e2, 0.55);
 scene.add(sun);
 globalThis.__mcSunLight = sun;   // [F-13] 设置面板 shadowMapSize 的落地目标（game-shell 消费）
 // [a7f 真实阴影] shadowMap 以前只是个空开关——全库没有任何 castShadow 标记。
@@ -3050,7 +3052,7 @@ const matteRects = [];
   slabMat.emissive = new THREE.Color(0xffffff);
   slabMat.emissiveIntensity = 0.08;   // 桌面兜底；手机端会被统一地面提亮覆盖为 0.34
   slabMat.userData.isGroundMat = true;
-  if (IS_MOBILE) { slabMat.emissive.setScalar(0.62); slabMat.emissiveIntensity = 0.72; }  // [F-41] 提亮移交 __boost
+  if (IS_MOBILE) { slabMat.emissive.setScalar(0.30); slabMat.emissiveIntensity = 0.22; }  // [迈阿密] 降自发光，避免地面死白
   // macro variation: the 9 m tile repeated over ~1 km reads as one synthetic
   // sheet from eye level. Multiply albedo by 3 octaves of world-XZ value noise
   // (170/41/9.5 m) so the expanse breaks into weathered patches and stains.
@@ -3526,8 +3528,8 @@ function paveFlush() {
     mat.userData.isGroundMat = true;
     // [2026-11-17a6] 补地格子是运行时动态创建的，赶不上建场时的材质精简循环，
     // 所以在这里直接套同一套「地面提亮」，否则永远是 0.08 的桌面档 → 走到哪黑到哪。
-    mat.emissive.setScalar(0.62);                         // [F-41] color 提亮移交 __boost
-    mat.emissiveIntensity = 0.72;
+    mat.emissive.setScalar(0.30);                         // [迈阿密] 降自发光
+    mat.emissiveIntensity = 0.22;
     // [a7o] 运行期补地同样挂立体贴图，否则「走到哪、新格子就是一张平纸」。
     ensureRelief('__pavement__', {
       tex: 'CP_Broken_Asphalt_A.png', texScale: [rep, rep],
@@ -3712,16 +3714,16 @@ if (PERF.isMobileUA && !/[?&]notrim/.test(location.search)) {
         const bs = o.geometry.boundingBox.getSize(new THREE.Vector3());
         const isGroundMat = m.userData && m.userData.isGroundMat;
         if (isGroundMat || (bs.y < 1.6 && Math.max(bs.x, bs.z) > 30)) {
-          m.color.multiplyScalar(2.4);
+          m.color.multiplyScalar(1.0);  // [迈阿密] 不再硬提亮基色，避免地面死白
           if (m.map) {
             m.emissiveMap = m.map;
-            m.emissive.setScalar(0.62);
+            m.emissive.setScalar(0.30);  // [迈阿密] 降自发光
             /* [2026-11-17a6] 定标过程（用染绿实验确认底板确实覆盖整个脚下）：
                沥青源图本身很暗（夜间沥青照片，像素值 15~50/255），而场景只有
                环境光，光照项几乎贡献不到可视亮度 —— 于是路面在屏幕上就是纯黑。
                这里把地面改成「近距离路灯照亮」的观感：以贴图自身亮度为准做自发光，
                强度 1.35 相当于把albums亮度抬到能在夜景里读出颗粒与裂缝。 */
-            m.emissiveIntensity = IS_MOBILE ? 0.72 : 1.0;   // [a6c] 1.35 → 0.72：消除人行道死白
+            m.emissiveIntensity = IS_MOBILE ? 0.22 : 0.6;   // [迈阿密] 真实沥青贴图不发白
           }
           boosted++;
         }

@@ -87,22 +87,21 @@ void main() {
   vec2 cell = vec2(axis / 2.6, w.y / 3.2);
   vec2 f = fract(cell);
   float win = step(0.16, f.x) * step(f.x, 0.84) * step(0.20, f.y) * step(f.y, 0.80);
-  float lit = 0.0;
+  float lit = 0.0;  // [迈阿密] 发光窗格已关闭：只留窗格几何，不做夜间黄光
   if (uDetail > 0.5) {
-    lit = step(0.63, h21(floor(cell) + floor(vSeed * 131.0))) * uNight;
     win *= 0.86 + 0.14 * h21(floor(cell) + 7.3);
   }
   // 真实楼高分级：高层玻璃化、低层混凝土；vHeight 来自官方实测 heightM
   float tall = smoothstep(15.0, 70.0, vHeight);
-  vec3 wall = mix(vec3(0.285, 0.293, 0.315), vec3(0.135, 0.165, 0.205), tall);
+  vec3 wall = mix(vec3(0.70, 0.67, 0.61), vec3(0.56, 0.54, 0.50), tall);  // [迈阿密] 暖白/米灰，去冷蓝
   // 真实分区代码 → 极轻微色偏（仅标识，不宣称规范含义）
   wall += vec3(0.022, 0.008, -0.010) * clamp(vZone, 0.0, 3.0) * 0.25;
-  vec3 glass = mix(vec3(0.052, 0.070, 0.105), vec3(0.98, 0.74, 0.40), lit * 0.88);
+  vec3 glass = mix(vec3(0.20, 0.20, 0.195), vec3(0.30, 0.30, 0.285), tall);  // [迈阿密] 中性暖灰反光玻璃，无发光窗
   if (uDetail > 0.5) {
     float spec = pow(max(dot(reflect(-L, N), V), 0.0), 28.0);
     glass += uSunColor * spec * (0.16 + 0.22 * tall);
   }
-  vec3 facade = mix(wall, glass, clamp(win, 0.0, 1.0) * mix(0.58, 0.92, tall));
+  vec3 facade = mix(wall, glass, clamp(win, 0.0, 1.0) * mix(0.52, 0.70, tall));
   // 外部真实贴图集：显式绑定才采样。UV 已是世界尺度归一，按 tiling 重复；
   // 只调制墙色（不覆盖窗/玻璃/屋顶），贴图归属由调用方决定，绝不自动分配。
   if (uFacadeOn > 0.5) {
@@ -385,7 +384,7 @@ export class UrbanEnhancer {
     const common = () => ({
       uSunDir:     { value: new THREE.Vector3(0.55, 0.42, 0.35).normalize() },
       uSunColor:   { value: new THREE.Color(0xffb98a) },
-      uSkyColor:   { value: new THREE.Color(0x8fa6c4) },
+      uSkyColor:   { value: new THREE.Color(0xd6d2c8) },
       uFogColor:   { value: new THREE.Color(0x8d7f8e) },
       uCam:        { value: new THREE.Vector3() },
       uFogDensity: { value: 0.0007 },
@@ -414,7 +413,7 @@ export class UrbanEnhancer {
         uCenter: { value: new THREE.Vector2() }, uSpan: { value: this.chunkSize },
         uSunDir: { value: new THREE.Vector3(0.55, 0.42, 0.35).normalize() },
         uSunColor: { value: new THREE.Color(0xffb98a) },
-        uSkyColor: { value: new THREE.Color(0x8fa6c4) },
+        uSkyColor: { value: new THREE.Color(0xd6d2c8) },
         uFogColor: { value: new THREE.Color(0x8d7f8e) },
         uCam: { value: new THREE.Vector3() },
         uFogDensity: { value: 0.0007 }, uExposure: { value: 1 }, uNight: { value: 1 },
@@ -435,7 +434,7 @@ export class UrbanEnhancer {
       vertexShader: ROAD_VERT, fragmentShader: ROAD_FRAG,
       uniforms: {
         uSunColor: { value: new THREE.Color(0xfff2dd) },
-        uSkyColor: { value: new THREE.Color(0xbcd6f5) },
+        uSkyColor: { value: new THREE.Color(0xd6d2c8) },
         uFogColor: { value: new THREE.Color(0xa9bccd) },
         uCam: { value: new THREE.Vector3() },
         uFogDensity: { value: 0.0008 },

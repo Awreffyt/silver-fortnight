@@ -194,7 +194,7 @@ export function mountUrbanLayer(scene, data, opts = {}) {
   const skipped = { noHeight: 0, noRings: 0, buildFail: 0 };
   const radius = opts.radius || 1050;
   const mat = opts.material || new THREE.MeshStandardMaterial({
-    color: 0x8a93a8, roughness: 0.86, metalness: 0.04, side: THREE.FrontSide,
+    color: 0xd8c9ad, roughness: 0.86, metalness: 0.04, side: THREE.FrontSide,  // [迈阿密] 暖白灰泥，去冷蓝
   });
 
   for (const ck of chunks) {
@@ -327,6 +327,69 @@ export class ChunkedUrbanLayer {
         color: 0xffffff, roughness: rough, metalness: metal,
         vertexColors: true, side: THREE.FrontSide,
       });
+      // [GTA6 式落地] 真实位移图（ambientCG Displacement）驱动 POM 视差遮蔽：
+      // 照片负责 1:1 外观，位移图让窗洞真凹进去、走近有视差、斜光有自遮挡。
+      // 这是「一张真实照片 100% 立体」的核心。位移图缺失时 POM 自动关闭。
+      const disp = tex('acg_' + name + '_Displacement.jpg', false);
+      const hasDisp = ['Facade001','Facade005','Facade006'].includes(name);
+      m.userData.pom = hasDisp;
+      m.userData.dispTex = hasDisp ? disp : null;
+      m.onBeforeCompile = sh => {
+        sh.uniforms.uDispMap = { value: hasDisp ? disp : null };
+        sh.uniforms.uPomScale = { value: hasDisp ? 0.030 : 0.0 };
+        sh.fragmentShader = sh.fragmentShader
+          .replace('#include <common>',
+            `#include <common>
+             uniform sampler2D uDispMap;
+             uniform float uPomScale;
+             float pomDepth(vec2 uv){ return texture2D(uDispMap, uv).r; }`)
+          // 在 map_fragment 之前做 POM：算出视差偏移后的 uv，替换 vMapUv
+          .replace('#include <map_fragment>',
+            `
+             #ifdef USE_MAP
+             vec2 pomUv = vMapUv;
+             if (uPomScale > 0.0) {
+               // 视线在切线空间的方向（用屏幕导数重建 TBN）
+               vec3 dpdx = dFdx(-vViewPosition);
+               vec3 dpdy = dFdy(-vViewPosition);
+               vec2 dtdx = dFdx(vMapUv);
+               vec2 dtdy = dFdy(vMapUv);
+               vec3 T = normalize(dpdx * dtdy.y - dpdy * dtdx.y);
+               vec3 B = normalize(-dpdx * dtdx.x + dpdy * dtdx.y);
+               vec3 N = normalize(vNormal);
+               T = normalize(T - N * dot(N, T));
+               B = normalize(cross(N, T));
+               vec3 V = normalize(vViewPosition);
+               vec2 vTangent = vec2(dot(V, T), dot(V, B));
+               float layers = mix(28.0, 12.0, clamp(abs(V.z), 0.0, 1.0));
+               float layerH = 1.0 / layers;
+               float curDepth = 1.0;
+               vec2 stepUv = vTangent * (uPomScale / layers) / max(abs(V.z), 0.35);
+               vec2 pomCur = vMapUv;
+               for (int i = 0; i < 32; i++) {
+                 float h = 1.0 - pomDepth(pomCur);
+                 if (h >= curDepth) break;
+                 pomCur -= stepUv;
+                 curDepth -= layerH;
+               }
+               // 层间插值，消除阶梯
+               float hAfter = 1.0 - pomDepth(pomCur);
+               float hBefore = curDepth + layerH;
+               float w = (hBefore - hAfter) / max(hBefore - curDepth, 1e-4);
+               pomUv = pomCur - stepUv * (1.0 - clamp(w, 0.0, 1.0));
+             }
+             vec4 sampledDiffuseColor = texture2D(map, pomUv);
+             #ifdef DECODE_VIDEO_TEXTURE
+               sampledDiffuseColor = sRGBTransferEOTF(sampledDiffuseColor);
+             #endif
+             diffuseColor *= sampledDiffuseColor;
+             // 提亮 + 去青（迈阿密暖白）
+             float lum = dot(diffuseColor.rgb, vec3(0.299,0.587,0.114));
+             diffuseColor.rgb = clamp(pow(diffuseColor.rgb, vec3(0.78)) * vec3(1.06,1.02,0.94) + lum*0.14, 0.0, 1.0);
+             #endif
+             `);
+        m.userData.pomShader = sh;
+      };
       return m;
     };
     // 六档：0 低层白灰泥 / 1 中层砖石 / 2 中层混凝土框 / 3-5 三种真玻璃幕
@@ -339,7 +402,8 @@ export class ChunkedUrbanLayer {
     // [2026-11-26] 摄影测量 Color 图烘焙了当天光照，叠上游戏日间 sun/hemi 后偏暗发青。
     // 用 material.color 做线性提亮补偿（不改原图像素，保持照片级细节）。
     for (const m of [this.matStucco, this.matMixed, this.matConcrete, this.matGlass, this.matGlassB, this.matGlassC]) {
-      if (m && m.color && m !== opts.material) m.color.setRGB(1.32, 1.30, 1.26);
+      // [2026-11-26 迈阿密暖白] 扫描图偏冷青，加强红、压蓝，暖白化整城楼体
+      if (m && m.color && m !== opts.material) m.color.setRGB(1.55, 1.45, 1.28);
     }
     this.material = this.matStucco;
     for (const c of manifest.chunks || []) this.byKey.set(c.key, c);
@@ -451,10 +515,13 @@ export class ChunkedUrbanLayer {
       if (!bg) { this.skipped.buildFail++; continue; }
       const hi = b.heightM > 60;
       const sd = seedOf(b.id, key);
-      /* 真实物理尺度：一张 Facade 贴图覆盖约 24m（Facade 扫描的 1 张 ≈ 一段 24m 立面），
-         窗格密度不再被拉成巨格或压成马赛克。灰泥是纯纹理无窗，周期 12m。 */
+      /* [2026-11-26 1:1 尺度修复] Facade 贴图是 gen_facade.py 按 48m×48m 真实尺度画的
+         （14 层 × 16 开间 → 每层 3.4m、每开间 3.0m，都是真实建筑模数）。
+         之前 period=26/24/12 把 48m 的图硬塞进一半尺寸 → 窗格密度翻倍 →
+         满屏密集小格马赛克，这正是「楼不像真楼」的根因。改回 48m 设计尺度。
+         低层灰泥无窗格，纹理尺度可小些；有窗的三档统一 48m。 */
       const band = hi ? (3 + (sd % 3)) : (b.heightM > 20 ? 1 + (sd % 2) : 0);
-      const period = band === 0 ? 12 : (band >= 3 ? 26 : 24);
+      const period = band === 0 ? 24 : 48;
       reprojectUV(bg, period, sd);
       buckets[band].push(bg);
       builtN++;
