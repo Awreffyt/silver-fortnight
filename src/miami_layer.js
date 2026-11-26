@@ -450,7 +450,7 @@ export class ChunkedUrbanLayer {
     try {
       if (!this.bucketCache.has(c.file)) {
         this.bucketCache.set(c.file,
-          fetch(this.base + c.file, { cache: 'no-store' })
+          fetch(this.base + c.file)
             .then(r => { if (!r.ok) throw new Error('HTTP ' + r.status); return r.json(); }));
         this.requests++;
       }
@@ -632,7 +632,10 @@ export class ChunkedUrbanLayer {
     return { visible, want, pending: want.filter(k => !this.loaded.has(k)) };
   }
 
-  async updateAndLoad(cameraPos, radius = this.radius) {
+  // [2026-11-26 预取修复] 加载半径 = 可视半径的 1.35 倍：
+  // 走到 cull 边缘前，下一批楼已开始下载（1~2MB JSON + 解析要 2~4 秒），
+  // 否则就会出现「走出那片区域后等好几秒楼房渲染不出来」。
+  async updateAndLoad(cameraPos, radius = Math.round(this.radius * 1.35)) {
     const s = this.update(cameraPos, radius);
     const q = s.pending.slice();
     while (q.length) {
@@ -674,7 +677,7 @@ export async function tryMountUrban(scene, opts = {}) {
   const base = opts.base || './data/';
   const mfUrl = opts.manifestUrl || (base + 'urban_manifest.json');
   try {
-    const r = await fetch(mfUrl, { cache: 'no-store' });
+    const r = await fetch(mfUrl);
     if (r.ok) {
       const mf = await r.json();
       if (mf && mf.mode === 'chunked' && Array.isArray(mf.chunks) && mf.chunks.length) {
@@ -693,7 +696,7 @@ export async function tryMountUrban(scene, opts = {}) {
     }
   } catch (e) { /* 清单缺失属预期，继续回退 */ }
   try {
-    const r = await fetch(opts.url || URBAN_DATA_URL, { cache: 'no-store' });
+    const r = await fetch(opts.url || URBAN_DATA_URL);
     if (!r.ok) return null;
     const d = await r.json();
     if (!d || !Array.isArray(d.buildings) || !d.buildings.length) return null;

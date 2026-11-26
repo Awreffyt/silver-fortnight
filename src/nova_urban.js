@@ -1150,7 +1150,7 @@ export async function mountUrbanEnhancement(scene, camera, renderer, layer, opts
   let ctx = opts.context || null;
   if (!ctx) {
     try {
-      const r = await fetch('./data/urban_context.json', { cache: 'no-store' });
+      const r = await fetch('./data/urban_context.json');
       if (r.ok) ctx = await r.json();
     } catch (e) { /* 规划数据缺失属预期 */ }
   }
@@ -1158,7 +1158,7 @@ export async function mountUrbanEnhancement(scene, camera, renderer, layer, opts
   let chunkSize = opts.chunkSize;
   if (!originCm) {
     try {
-      const r = await fetch('./data/urban_manifest.json', { cache: 'no-store' });
+      const r = await fetch('./data/urban_manifest.json');
       if (r.ok) {
         const mf = await r.json();
         originCm = (mf.alignment && mf.alignment.originCm) || [0, 0];

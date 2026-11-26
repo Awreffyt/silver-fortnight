@@ -473,7 +473,7 @@ export async function createChunkStream(opts) {
   const mfUrl = (opts.base || './data/') + 'urban_manifest.json';
   let mf = null;
   try {
-    const r = await (opts.fetchImpl || fetch)(mfUrl, { cache: 'no-store' });
+    const r = await (opts.fetchImpl || fetch)(mfUrl);
     if (!r.ok) return null;
     mf = await r.json();
   } catch (_) { return null; }

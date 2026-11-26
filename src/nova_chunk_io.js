@@ -362,7 +362,7 @@ export class ChunkIO {
       this.stats.aborts++;
     }, this.abortAfterMs);
 
-    b.promise = this.fetchImpl(url, { signal: ctrl.signal, cache: 'no-store' })
+    b.promise = this.fetchImpl(url, { signal: ctrl.signal })
       .then(r => {
         if (!r.ok) throw new Error('HTTP ' + r.status + ' ' + url);
         return r.arrayBuffer ? r.arrayBuffer() : r.text();

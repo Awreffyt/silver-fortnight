@@ -57,7 +57,7 @@ class Layer {
     try {
       let d = this.files.get(c.file);
       if (!d) {
-        this.files.set(c.file, fetch(this.base + c.file, { cache: 'no-store' })
+        this.files.set(c.file, fetch(this.base + c.file)
           .then(r => { if (!r.ok) throw new Error('HTTP ' + r.status); return r.json(); }));
         d = this.files.get(c.file);
       }
@@ -162,7 +162,7 @@ class GroundLayer extends Layer {
     try {
       let d = this.files.get(c.file);
       if (!d) {
-        this.files.set(c.file, fetch(this.base + c.file, { cache: 'no-store' })
+        this.files.set(c.file, fetch(this.base + c.file)
           .then(r => { if (!r.ok) throw new Error('HTTP ' + r.status); return r.json(); }));
         d = this.files.get(c.file);
       }
@@ -255,7 +255,7 @@ class PointLayer {
     this.loading.add(key);
     try {
       let d = this.files.get(c.file);
-      if (!d) { this.files.set(c.file, fetch(this.base + c.file, { cache: 'no-store' })
+      if (!d) { this.files.set(c.file, fetch(this.base + c.file)
         .then(r => { if (!r.ok) throw new Error('HTTP ' + r.status); return r.json(); })); d = this.files.get(c.file); }
       const pack = (await d)[key] || {};
       const g = this._group(key); if (!g) return;
@@ -391,7 +391,7 @@ class RoadLayer {
     try {
       let d = this.files.get(c.file);
       if (!d) {
-        this.files.set(c.file, fetch(this.base + c.file, { cache: 'no-store' })
+        this.files.set(c.file, fetch(this.base + c.file)
           .then(r => { if (!r.ok) throw new Error('HTTP ' + r.status); return r.json(); }));
         d = this.files.get(c.file);
       }
@@ -454,7 +454,7 @@ export class UrbanFull {
 
   async init() {
     const g = async (f) => {
-      try { const r = await fetch(this.base + f, { cache: 'no-store' }); if (!r.ok) return null; return await r.json(); }
+      try { const r = await fetch(this.base + f); if (!r.ok) return null; return await r.json(); }
       catch (e) { return null; }
     };
     const [gm, lm, pm] = await Promise.all([
