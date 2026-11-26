@@ -111,6 +111,12 @@ export class ChunkStream {
     this.manifest = o.manifest;
     this.tier = typeof o.tier === 'string' ? (TIERS[o.tier] || TIERS.mobile) : (o.tier || TIERS.mobile);
     this.onMount = o.onMount || (() => null);
+    // [2026-11-26 转视角帧率修复] onMount(几百楼几何挤出+合并)每块 40~80ms 且完全同步。
+    // 旧实现 decode 一完成就在回调里直接构建——转视角时一批块同时 decode 完，
+    // 一帧内连跑十几个 onMount → 主线程卡 500~1000ms → 帧率直接跌到 1。
+    // 改为构建队列：decode 完成先入队，每帧按时间预算逐个消化（楼逐波浮现）。
+    this.pendingMounts = [];
+    this.mountBudgetMs = o.mountBudgetMs || 12;
     this.onUnmount = o.onUnmount || (() => {});
     this.onBudget = o.onBudget || null;
     this.onError = o.onError || null;
@@ -343,6 +349,10 @@ export class ChunkStream {
     const decodeBudget = scaled(this.governor, 'decodeBudgetMs');
     this.io.pump(now, decodeBudget);
 
+    // 6.5) [转视角帧率修复] 按帧预算消化构建队列：每帧最多花 mountBudgetMs
+    //      在几何挤出/合并上，其余留到后续帧。fetch/decode 仍全速并行预取。
+    this._drainMounts(now);
+
     this.ownMs = (typeof performance !== 'undefined' ? performance.now() : Date.now()) - t0;
     this.telemetry.push(this.frameMs, this.ownMs, this.loads, this.evicts,
                         this.resident.size, now);
@@ -351,6 +361,40 @@ export class ChunkStream {
              loads: this.loads, evicts: this.evicts, resident: this.resident.size,
              ownMs: +this.ownMs.toFixed(3), scale: +scale.toFixed(2),
              pressure: +budgetPressure(this.budget).toFixed(3) };
+  }
+
+  /** [转视角帧率修复] 每帧按时间预算消化构建队列。 */
+  _drainMounts(now) {
+    if (!this.pendingMounts.length) return;
+    const mb = Math.max(4, scaled(this.governor, 'uploadBudgetMs') || this.mountBudgetMs);
+    const t0 = (typeof performance !== 'undefined' ? performance.now() : Date.now());
+    while (this.pendingMounts.length) {
+      const job = this.pendingMounts.shift();
+      this._mountNow(job, now);
+      if ((typeof performance !== 'undefined' ? performance.now() : Date.now()) - t0 >= mb) break;
+    }
+  }
+
+  _mountNow(job, now) {
+    const { e, rows, bucket, cached } = job;
+    this._move(e, CS.UPLOADING, now);
+    const built = this.onMount(e.key, rows, e.rec, { cached, bucket });
+    if (built === null || built === false) {
+      this._move(e, CS.FAILED, now);
+      this.onError && this.onError('mount_failed ' + e.key);
+      return;
+    }
+    e.object = built.object || null;
+    e.buildings = built.buildings || rows.length;
+    e.triangles = built.triangles || 0;
+    e.textureMB = built.textureMB || 0;
+    e.geometryMB = built.geometryMB || 0;
+    budgetAdd(this.budget, { chunks: 1, buildings: e.buildings,
+      triangles: e.triangles, textureMB: e.textureMB, geometryMB: e.geometryMB });
+    e.visible = true;
+    this._move(e, CS.RESIDENT, now);
+    this.failed.delete(e.key);
+    this.loads++;
   }
 
   _request(e, now, isPrefetch = false) {
@@ -367,25 +411,8 @@ export class ChunkStream {
       (rows, bucket, cached) => {
         self._move(e, CS.FETCHING, now);
         self._move(e, CS.DECODING, now);
-        self._move(e, CS.UPLOADING, now);
-        const built = self.onMount(e.key, rows, e.rec, { cached, bucket });
-        if (built === null || built === false) {
-          self._move(e, CS.UPLOADING, now);
-          self._move(e, CS.FAILED, now);
-          self.onError && self.onError('mount_failed ' + e.key);
-          return;
-        }
-        e.object = built.object || null;
-        e.buildings = built.buildings || rows.length;
-        e.triangles = built.triangles || est.triangles;
-        e.textureMB = built.textureMB || 0;
-        e.geometryMB = built.geometryMB || est.geometryMB;
-        budgetAdd(self.budget, { chunks: 1, buildings: e.buildings,
-          triangles: e.triangles, textureMB: e.textureMB, geometryMB: e.geometryMB });
-        e.visible = true;
-        self._move(e, CS.RESIDENT, now);
-        self.failed.delete(e.key);
-        self.loads++;
+        // [转视角帧率修复] 不再同步构建：入队等本帧预算消化
+        self.pendingMounts.push({ e, rows, bucket, cached, now });
       },
       (err, attempt) => {
         e.attempts = attempt || (e.attempts + 1);
