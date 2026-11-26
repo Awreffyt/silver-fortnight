@@ -311,12 +311,19 @@ export class ChunkedUrbanLayer {
       if (srgb) t.colorSpace = THREE.SRGBColorSpace;
       return t;
     };
+    // [2026-11-26 性能] 移动端判定：iPhone XR 等 A12 设备 fragment 预算极紧，
+    // GTA6 式 GPU POM(32次/像素) 直接打爆。改走 CPU 预烘焙法线(BakedN)——
+    // 窗洞凹凸在加载前由 CPU 从位移图算好，GPU 每像素只采样 1 次。
+    const MOBILE_RT = !!(globalThis.__mcPerf && globalThis.__mcPerf.isMobileUA);
+    const BAKED = ['Facade001','Facade005','Facade006'];
     // name = 贴图资产名；rough = 基准粗糙度；metal = 金属度（玻璃幕框用）
     const mkMat = (name, rough = 0.84, metal = 0.0) => {
       const m = new THREE.MeshStandardMaterial({
         map: tex('acg_' + name + '_Color.jpg', true),
-        normalMap: tex('acg_' + name + '_NormalGL.jpg', false),
-        normalScale: new THREE.Vector2(0.45, 0.45),  // 烘焙光照的扫描图，法线再强会双重阴影
+        normalMap: tex('acg_' + name + (MOBILE_RT && BAKED.includes(name) ? '_BakedN' : '_NormalGL') + '.jpg', false),
+        normalScale: MOBILE_RT
+          ? new THREE.Vector2(0.85, 0.85)   // CPU烘焙法线：直接编码窗洞坡度，需更强才出立体感
+          : new THREE.Vector2(0.45, 0.45),  // 桌面端保留原生法线+GPU POM
         roughnessMap: tex('acg_' + name + '_Roughness.jpg', false),
         // 部分扫描资产无 AO 通道；缺档时用 1×1 纯白纹理（AO=1，不改变光照），
         // 避免 TextureLoader 404 拖慢首屏且材质仍能统一走 uv1。
@@ -330,8 +337,8 @@ export class ChunkedUrbanLayer {
       // [GTA6 式落地] 真实位移图（ambientCG Displacement）驱动 POM 视差遮蔽：
       // 照片负责 1:1 外观，位移图让窗洞真凹进去、走近有视差、斜光有自遮挡。
       // 这是「一张真实照片 100% 立体」的核心。位移图缺失时 POM 自动关闭。
-      const disp = tex('acg_' + name + '_Displacement.jpg', false);
-      const hasDisp = ['Facade001','Facade005','Facade006'].includes(name);
+      const hasDisp = !MOBILE_RT && BAKED.includes(name);   // 移动端关闭 GPU POM
+      const disp = hasDisp ? tex('acg_' + name + '_Displacement.jpg', false) : null;
       m.userData.pom = hasDisp;
       m.userData.dispTex = hasDisp ? disp : null;
       m.onBeforeCompile = sh => {

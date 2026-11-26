@@ -124,7 +124,10 @@ const PERF = (() => {
     // 手机主力档 [a7g 回退]：a7f 试过 Bloom + MSAA + DPR2，结果是显存被推回红线 →
     // WebGL 上下文丢失（整片发黑 / 黑块 / 贴图全丢）。显存省出来的是「余量」，
     // 不是「预算」，不能全花掉。回退到 a7e 的省显存配置，只保留 30 帧锁。
-    mobile:    { composer: false, bloom: false, dprCap: 2.0,  cull: 1200, shadows: false, msaa: false },
+    // [2026-11-26 iPhone XR 卡崩修复] 2.0×DPR 在 2x 屏等于渲染 4 倍像素
+    // （828×1792 CSS → 1656×3584），A12 fragment 直接饱和；配合已关的 POM，
+    // DPR 降到 1.15 仍清晰（烘焙法线保立体感），像素量减少约 3 倍。cull 同步收紧。
+    mobile:    { composer: false, bloom: false, dprCap: 1.15, cull: 700,  shadows: false, msaa: false },
     // 低端机（deviceMemory < 4）：DPR 再降，剔除半径收紧
     // [a7i] 0.85 → 1.0：0.85 在 3x 屏上等于整屏糊一层灰，低端机也至少要 1:1 像素。
     mobileLow: { composer: false, bloom: false, dprCap: 1.0, cull: 320, shadows: false, msaa: false },
