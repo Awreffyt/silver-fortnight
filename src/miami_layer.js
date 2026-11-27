@@ -37,8 +37,8 @@ function addRoofForm(geo, building) {
   const H = building.heightM;
   if (w < 3 || d < 3 || H < 9) return geo;     // 过小/过矮的楼不加，避免噪点
   const cx = (bb.min.x + bb.max.x) / 2, cz = (bb.min.z + bb.max.z) / 2;
-  const baseY = building.baseY || 0;
-  const topY = baseY + H;
+  // topY 取几何实际顶部（buildUrbanGeometry 已整体抬升 LIFT），避免设备层嵌进楼体。
+  const topY = bb.max.y;
   const box = (sx, sy, sz, cy, ox, oz) => {
     const g = new THREE.BoxGeometry(sx, sy, sz).toNonIndexed();
     g.translate(cx + (ox || 0), cy, cz + (oz || 0));
@@ -90,11 +90,30 @@ export function buildUrbanGeometry(building) {
     shape.holes.push(path);
   }
 
-  const geo = new THREE.ExtrudeGeometry(shape, {
+  // [沉地面修复] 地面层 y=0.02~0.08、楼底旧值 y=0：远景楼底被地面平板从低视角
+  // 切平，看起来像"陷进地面"。做法：主体抬升 LIFT=0.35（高于最高地面层 0.08），
+  // 再用同轮廓向下补一段地基裙边到 -1.5m，把地面与楼底之间的缝封死。
+  // 楼"坐"在地上、有勒脚，主体立面完全露出，既不被切也不悬空。
+  // 数据 baseY 全 0，抬升/裙边都是纯渲染常量，不改真实 heightM。
+  const LIFT = 0.35;
+  const by = building.baseY || 0;
+  let geo = new THREE.ExtrudeGeometry(shape, {
     depth: H, bevelEnabled: false, steps: 1, curveSegments: 1,
   });
   geo.rotateX(-Math.PI / 2);
-  geo.translate(0, building.baseY || 0, 0);
+  geo.translate(0, by + LIFT, 0);
+  // 地基裙边：同轮廓（含洞）向下挤出，封住地面平板与楼底之间的缝。
+  const skirt = new THREE.ExtrudeGeometry(shape, {
+    depth: LIFT + 1.5, bevelEnabled: false, steps: 1, curveSegments: 1,
+  });
+  skirt.rotateX(-Math.PI / 2);
+  skirt.translate(0, by - 1.5, 0);
+  const mergedBase = mergeGeometries([geo, skirt], false);
+  if (mergedBase) {
+    geo.dispose(); skirt.dispose(); geo = mergedBase;
+  } else {
+    skirt.dispose();  // 合并失败则退回仅主体，仍可渲染，不影响加载
+  }
   // UV 按世界尺度归一，供未走 reproject 的路径直接复用
   const uv = geo.getAttribute('uv');
   if (uv) for (let i = 0; i < uv.count; i++) uv.setXY(i, uv.getX(i) * UV_SCALE, uv.getY(i) * UV_SCALE);
@@ -363,13 +382,19 @@ export class ChunkedUrbanLayer {
     // 六档照片级材质。map 是照片级迈阿密立面 Color；normal/roughness/位移
     // 沿用 ambientCG CC0 摄影测量数据，保证窗洞凹凸的真实立体感。
     const TL = new THREE.TextureLoader();
+    // [贴图慢修复] 全局开启纹理缓存：13 种材质共用了大量同名贴图
+    // (Facade001/005/006/018A/020A 的 Normal/Roughness/AO)，不开 Cache 会让
+    // 每种材质各自发一遍 HTTP + 解码一遍 1024²图；开启后同名 URL 只请求/解码一次。
+    if (THREE.Cache) THREE.Cache.enabled = true;
     // 全局贴图显存记账：uuid→字节，跨 chunk 去重（chunk 级会把共享贴图
     // 重复计几十次，实测 11.6GB 假账）。
     if (!globalThis.__texMemMap) { globalThis.__texMemMap = new Map(); globalThis.__texMemTotal = 0; }
+    // 本次新增 BakedN（018A/020A/Plaster006）+ 通道图降采样，破缓存版本号更新。
+    const TEX_VER = '20261128fast';
     const tex = (f, srgb) => {
       // 贴图内容变了但同名时,服务端 max-age 会让手机一直拿旧图；
       // 改图只改这个版本号常量即可强制刷新。
-      const t = TL.load('./textures/real/' + f + '?v=20261127div4', loaded => {
+      const t = TL.load('./textures/real/' + f + '?v=' + TEX_VER, loaded => {
         try {
           const img = loaded && loaded.image;
           const w = img && (img.width || img.videoWidth), h = img && (img.height || img.videoHeight);
@@ -381,14 +406,20 @@ export class ChunkedUrbanLayer {
         } catch (e) { /* 记账失败不影响渲染 */ }
       });
       t.wrapS = t.wrapT = THREE.RepeatWrapping;
-      t.anisotropy = 8;
+      // [贴图慢修复] anisotropy 8→4：各向异性过滤是采样开销大头，
+      // 手机端 4 已足够清晰（透视地面/立面），桌面端保持 8。
+      t.anisotropy = MOBILE_RT ? 4 : 8;
       if (srgb) t.colorSpace = THREE.SRGBColorSpace;
       return t;
     };
     // 移动端用 CPU 预烘焙法线（窗洞凹凸加载前算好，GPU 每像素只采样 1 次），
     // 桌面端保留原生法线 + GPU POM 视差。
     const MOBILE_RT = !!(globalThis.__mcPerf && globalThis.__mcPerf.isMobileUA);
-    const BAKED = ['Facade001', 'Facade005', 'Facade006'];
+    // [贴图慢修复] 本次为 018A/020A/Plaster006 也生成了 BakedN(250~293KB)，
+    // 手机端全部走烘焙法线，不再拉 6~8MB 的 2048² NormalGL（省 ~20MB 首屏流量）。
+    const BAKED = ['Facade001', 'Facade005', 'Facade006', 'Facade018A', 'Facade020A', 'PaintedPlaster006'];
+    // POM 视差只在桌面端对有 Displacement 图的 3 种开启（018A/020A/Plaster006 无该图）。
+    const POM = ['Facade001', 'Facade005', 'Facade006'];
     // [多样性] colorName 可与 PBR 通道名不同：新迈阿密外观只换 Color 贴图，
     // 法线/粗糙度/AO 复用同结构建筑的真实摄影测量通道，窗洞凹凸立体感不变。
     const mkMat = (name, rough = 0.84, metal = 0.0, colorName = name) => {
@@ -404,7 +435,7 @@ export class ChunkedUrbanLayer {
         color: 0xffffff, roughness: rough, metalness: metal,
         vertexColors: true, side: THREE.FrontSide,
       });
-      const hasDisp = !MOBILE_RT && BAKED.includes(name);
+      const hasDisp = !MOBILE_RT && POM.includes(name);
       const disp = hasDisp ? tex('acg_' + name + '_Displacement.jpg', false) : null;
       m.userData.pom = hasDisp;
       m.userData.dispTex = hasDisp ? disp : null;
