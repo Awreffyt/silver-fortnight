@@ -127,7 +127,10 @@ const PERF = (() => {
     // [2026-11-26 iPhone XR 卡崩修复] 2.0×DPR 在 2x 屏等于渲染 4 倍像素
     // （828×1792 CSS → 1656×3584），A12 fragment 直接饱和；配合已关的 POM，
     // DPR 降到 1.15 仍清晰（烘焙法线保立体感），像素量减少约 3 倍。cull 同步收紧。
-    mobile:    { composer: false, bloom: false, dprCap: 1.15, cull: 1100, shadows: false, msaa: false },  // [2026-11-26 城市空修复] 700把真实城市圈(1208m)砍掉4成→视野外全是空地; 远景走AABB代理成本极低,拉回1100
+    // [2026-11-27 去糊] 1.15 是硬上限:自适应RENDER_SCALE最高只能回1.0→DPR永远锁1.15,
+    // 只渲染476×1030再拉伸到全屏(原生1/3像素),整屏糊。抬到1.5(设置里本就是1.5),
+    // 自适应RENDER_SCALE继续兜底:帧率够吃满1.5、掉帧自动降,兼顾清晰与XR帧率。
+    mobile:    { composer: false, bloom: false, dprCap: 1.5, cull: 1100, shadows: false, msaa: false },  // [2026-11-26 城市空修复] 700把真实城市圈(1208m)砍掉4成→视野外全是空地; 远景走AABB代理成本极低,拉回1100
     // 低端机（deviceMemory < 4）：DPR 再降，剔除半径收紧
     // [a7i] 0.85 → 1.0：0.85 在 3x 屏上等于整屏糊一层灰，低端机也至少要 1:1 像素。
     mobileLow: { composer: false, bloom: false, dprCap: 1.0, cull: 620, shadows: false, msaa: false },  // [同上] 320几乎贴脸,拉到620保底城市感
@@ -549,7 +552,9 @@ let LOAD_SEQ = 0;
 //   地面类         1024² 常驻 —— 沥青/人行道/瓷砖是脚下大面积重复材质，
 //                                玩家永远贴着看，且只有 14 张，常驻最高清最划算
 // 预算 224MB：14×5.6 + 68×1.4 ≈ 173MB 基线，余量够 9 张近景动态 1024。
-const TEX_NEAR_SIDE = () => (IS_MOBILE ? Math.min(1024, TEX_MAX || 1024) : 0);
+// [2026-11-27 去糊] 近景贴图 1024→2048:源资产就是2048,贴脸楼/地面用满分辨率。
+// 显存由 trimToBudget 按距离驱逐硬约束,近景只留十几张2048,装得下(实测稳态336MB<480MB预算)。
+const TEX_NEAR_SIDE = () => (IS_MOBILE ? Math.min(2048, TEX_MAX || 2048) : 0);
 /* [a7i] 中景 640 → 512。实测 82 张 640 驻留 254MB，把 288 预算顶到 88%：
    trim 每轮都在挤，最后 22 张（含 CP_City_Ground / Asphalt / Windows_01 /
    Skyscraper —— 全是眼前的东西）被踢成 64px 缩略图 → 「一锅粥」。
@@ -1587,8 +1592,11 @@ const SKY_PRESETS = {
   },
   day: {  // blue sky with white drifting clouds
     zenith: 0x2a6ad0, horizon: 0xc9dff2, ground: 0x8b8880,   // [迈阿密] 大地灰：地平线以下是城市而非黑洞
-    sunDir: [0.35, 0.75, 0.45], sunColor: 0xfff4e0, sunSize: 0.011, sunGlow: 380, halo: 1.0, sunDisk: 2.5,
-    cloudCover: 0.46, cloudCol: 0xf4f8fc, cloudLit: 0.55, cloudAlpha: 0.92, cloudScale: 1.0,
+    // [2026-11-27 去糊白] 原cloudCover0.46+alpha0.92+近白云把46%天空铺成不透明白,
+    // 叠加sunGlow380强光晕→整片天灰白糊。压到0.22云量/0.6透明度、光晕380→150,
+    // 还原迈阿密通透蓝天+少量白云。
+    sunDir: [0.35, 0.75, 0.45], sunColor: 0xfff4e0, sunSize: 0.011, sunGlow: 150, halo: 0.8, sunDisk: 2.5,
+    cloudCover: 0.22, cloudCol: 0xf4f8fc, cloudLit: 0.55, cloudAlpha: 0.6, cloudScale: 1.0,
     wind: [0.02, 0.008], stars: 0.0, moon: 0.0,
     moonDir: [-0.45, 0.5, -0.35], moonCol: 0xdfe6ff, moonSize: 0.022,
     hemiSky: 0xbcd6f5, hemiGnd: 0x7a7268, hemiInt: 2.25,   // [a6c] 1.75 → 2.25：街谷不再死黑
