@@ -310,7 +310,7 @@ export class ChunkedUrbanLayer {
     const tex = (f, srgb) => {
       // [缓存修复] 贴图内容变了但同名，服务端 max-age 86400 会让手机一直拿旧图。
       // 加版本号强制刷新；以后改图只改这个常量。
-      const t = TL.load('./textures/real/' + f + '?v=20261127miami', loaded => {
+      const t = TL.load('./textures/real/' + f + '?v=20261127sharp', loaded => {
         try {
           const img = loaded && loaded.image;
           const w = img && (img.width || img.videoWidth), h = img && (img.height || img.videoHeight);

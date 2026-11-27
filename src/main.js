@@ -1016,20 +1016,18 @@ function adaptTick(dtMs) {
   const LOW = Math.min(26, cap * 0.78);
   const HIGH = Math.min(45, cap * 0.90);
   if (f < LOW) { ADAPT.lowWin++; ADAPT.highWin = 0; } else if (f > HIGH) { ADAPT.highWin++; ADAPT.lowWin = 0; } else { ADAPT.lowWin = 0; ADAPT.highWin = 0; }
-  if (ADAPT.lowWin >= 2) {
+  if (ADAPT.lowWin >= 6) {
     ADAPT.lowWin = 0;
-    // [a7i] 分辨率下限 0.55 → 0.70：0.55 在 3x 屏上就是 0.83 DPR，肉眼全是糊，
-    // 为了几帧把画面毁掉不值；视距先降，像素保底。
-    // [2026-11-26 手机糊屏修复] 0.70×1.5=1.05 DPR，实拍就是一片糊。手机屏小、
-    // 看点全在立面窗格，像素保底 0.85：宁可少几帧也不毁清晰度。
-    if (RENDER_SCALE > 0.85) { RENDER_SCALE = Math.max(0.85, RENDER_SCALE - 0.075); applyRenderScale(); }
-    else if (CULL_SCALE > 0.62) { CULL_SCALE = Math.max(0.62, CULL_SCALE - 0.12); LAST_CULL = 0; }
+    // [2026-11-27 糊屏根治] 分辨率 RENDER_SCALE 恒定 1.0 永不降级。
+    // DPR<1 就是把低分辨率画面拉伸显示 —— 这是"糊成一坨"的唯一根因。
+    // 性能不足时只砍视距(CULL_SCALE)，近处立面窗格永远保持原生清晰。
+    // 加载期帧抖不误判：门槛 2→6 个窗口(需连续 6 秒低帧才动)。
+    if (CULL_SCALE > 0.62) { CULL_SCALE = Math.max(0.62, CULL_SCALE - 0.12); LAST_CULL = 0; }
     else if (!PERF.adaptedLow) { PERF.adaptedLow = true; }
-    console.warn(`[adapt] ${f.toFixed(0)}fps → render ${RENDER_SCALE.toFixed(2)}× / 视距 ${CULL_SCALE.toFixed(2)}×`);
+    console.warn(`[adapt] ${f.toFixed(0)}fps → 视距 ${CULL_SCALE.toFixed(2)}× (分辨率锁1.0)`);
   } else if (ADAPT.highWin >= 6) {
     ADAPT.highWin = 0;
     if (CULL_SCALE < 1) { CULL_SCALE = Math.min(1, CULL_SCALE + 0.1); LAST_CULL = 0; }
-    else if (RENDER_SCALE < 1) { RENDER_SCALE = Math.min(1, RENDER_SCALE + 0.1); applyRenderScale(); }
   }
 }
 function applyRenderScale() {
@@ -4542,7 +4540,7 @@ window.__mcFpsProbe = () => fps;                    // 测试/调试：当前帧
       const LOW = Math.min(22, cap * 0.72), HIGH = Math.min(44, cap * 0.90);
       if (f < LOW) {
         highWin = 0;
-        if (++lowWin >= 2 && RELIEF.currentLevel < 2) {
+        if (++lowWin >= 4 && RELIEF.currentLevel < 2) {
           lowWin = 0;
           setGlobalReliefLevel(RELIEF.currentLevel + 1);
           console.log('[relief] 帧率不足 → 降级 L' + RELIEF.currentLevel);
