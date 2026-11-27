@@ -93,15 +93,19 @@ void main() {
   }
   // 真实楼高分级：高层玻璃化、低层混凝土；vHeight 来自官方实测 heightM
   float tall = smoothstep(15.0, 70.0, vHeight);
-  vec3 wall = mix(vec3(0.70, 0.67, 0.61), vec3(0.56, 0.54, 0.50), tall);  // [迈阿密] 暖白/米灰，去冷蓝
+  // [2026-11-27 白塔修复] 旧墙色 0.70 暖白经曝光+光照后成纯白塔,不像迈阿密。
+  // 迈阿密 downtown 高楼以玻璃幕墙(深青灰)为主,低层混凝土为暖灰。压低基色。
+  vec3 wall = mix(vec3(0.46, 0.44, 0.40), vec3(0.32, 0.33, 0.35), tall);
   // 真实分区代码 → 极轻微色偏（仅标识，不宣称规范含义）
   wall += vec3(0.022, 0.008, -0.010) * clamp(vZone, 0.0, 3.0) * 0.25;
-  vec3 glass = mix(vec3(0.20, 0.20, 0.195), vec3(0.30, 0.30, 0.285), tall);  // [迈阿密] 中性暖灰反光玻璃，无发光窗
+  vec3 glass = mix(vec3(0.13, 0.17, 0.20), vec3(0.18, 0.24, 0.28), tall);  // 青灰玻璃幕墙,无发光窗
   if (uDetail > 0.5) {
     float spec = pow(max(dot(reflect(-L, N), V), 0.0), 28.0);
     glass += uSunColor * spec * (0.16 + 0.22 * tall);
   }
-  vec3 facade = mix(wall, glass, clamp(win, 0.0, 1.0) * mix(0.52, 0.70, tall));
+  // [2026-11-27] 提高窗格对高楼的覆盖率,让玻璃幕墙横竖网格在远景也读得出来,
+  // 不再是光秃白塔。低层保持混凝土质感(较低权重)。
+  vec3 facade = mix(wall, glass, clamp(win, 0.0, 1.0) * mix(0.62, 0.92, tall));
   // 外部真实贴图集：显式绑定才采样。UV 已是世界尺度归一，按 tiling 重复；
   // 只调制墙色（不覆盖窗/玻璃/屋顶），贴图归属由调用方决定，绝不自动分配。
   if (uFacadeOn > 0.5) {

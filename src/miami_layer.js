@@ -405,9 +405,10 @@ export class ChunkedUrbanLayer {
                sampledDiffuseColor = sRGBTransferEOTF(sampledDiffuseColor);
              #endif
              diffuseColor *= sampledDiffuseColor;
-             // 提亮 + 去青（迈阿密暖白）
-             float lum = dot(diffuseColor.rgb, vec3(0.299,0.587,0.114));
-             diffuseColor.rgb = clamp(pow(diffuseColor.rgb, vec3(0.78)) * vec3(1.06,1.02,0.94) + lum*0.14, 0.0, 1.0);
+             // [2026-11-27 白塔修复] 旧 gamma 0.78 + lum*0.14 把深灰玻璃洗成米白塔。
+             // 摄影贴图已含真实反照率,只做极轻微暖色校正,不再整体提亮。
+             // float lum = dot(diffuseColor.rgb, vec3(0.299,0.587,0.114));
+             diffuseColor.rgb = clamp(pow(diffuseColor.rgb, vec3(0.96)) * vec3(1.02,1.0,0.97), 0.0, 1.0);
              #endif
              `);
         m.userData.pomShader = sh;
@@ -424,8 +425,9 @@ export class ChunkedUrbanLayer {
     // [2026-11-26] 摄影测量 Color 图烘焙了当天光照，叠上游戏日间 sun/hemi 后偏暗发青。
     // 用 material.color 做线性提亮补偿（不改原图像素，保持照片级细节）。
     for (const m of [this.matStucco, this.matMixed, this.matConcrete, this.matGlass, this.matGlassB, this.matGlassC]) {
-      // [2026-11-26 迈阿密暖白] 扫描图偏冷青，加强红、压蓝，暖白化整城楼体
-      if (m && m.color && m !== opts.material) m.color.setRGB(1.55, 1.45, 1.28);
+      // [2026-11-27 白塔修复] 旧 setRGB(1.55,1.45,1.28) 把深灰玻璃×1.55洗成白塔。
+      // 贴图本身已是真实反照率(玻璃幕墙均值~0.3),只需极轻微暖偏,不再整体放大。
+      if (m && m.color && m !== opts.material) m.color.setRGB(1.04, 1.0, 0.95);
     }
     this.material = this.matStucco;
     for (const c of manifest.chunks || []) this.byKey.set(c.key, c);

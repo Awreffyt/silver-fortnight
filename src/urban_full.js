@@ -112,8 +112,15 @@ class GroundLayer extends Layer {
     super(scene, manifest, color, opts);
     this.radius = opts.radius || 1250;
     this.maxChunks = opts.maxChunks || 18;
-    this.matParcel = new THREE.MeshBasicMaterial({ color: 0x6f6d66, side: THREE.DoubleSide });   // 地面不吃光照：Lambert 在自定义法线下会整片死黑
-    this.matWater  = new THREE.MeshBasicMaterial({ color: 0x2f6d8a, side: THREE.DoubleSide, transparent: false });
+    // [2026-11-27 地面显形] 264MB 真实地块数据此前被画成纯色块 MeshBasicMaterial(0x6f6d66),
+    // 玩家脚下/远看都是一块灰板 —— 这正是"几百MB不如程序生成"的根因。换成实拍铺石贴图。
+    const TL = new THREE.TextureLoader();
+    const texPave = TL.load('./textures/real/acg_PavingStones070_Color.webp');
+    texPave.wrapS = texPave.wrapT = THREE.RepeatWrapping;
+    texPave.colorSpace = THREE.SRGBColorSpace;
+    texPave.anisotropy = 4;
+    this.matParcel = new THREE.MeshStandardMaterial({ map: texPave, roughness: 0.95, metalness: 0, side: THREE.DoubleSide });
+    this.matWater  = new THREE.MeshStandardMaterial({ color: 0x2f6d8a, roughness: 0.18, metalness: 0.1, side: THREE.DoubleSide, transparent: false });
     this.matZone   = new THREE.LineBasicMaterial({ color: 0x74b6ff, transparent: true, opacity: 0.34, depthWrite: false });
     this.planVisible = false;
     this.zMeshes = new Map();
@@ -149,6 +156,13 @@ class GroundLayer extends Layer {
     const nor = new Float32Array(pos.length);
     for (let i = 0; i < nor.length; i += 3) nor[i + 1] = 1;
     geo.setAttribute('normal', new THREE.BufferAttribute(nor, 3));
+    // [2026-11-27 地面显形] 真实地块多边形此前无 uv → 贴图无法平铺。按世界 XZ 生成 uv,
+    // 每 24m 一个贴图周期(与立面 48m 尺度一致的一半,地面颗粒更细)。
+    const uv = new Float32Array((pos.length / 3) * 2);
+    for (let i = 0, j = 0; i < pos.length; i += 3, j += 2) {
+      uv[j] = pos[i] / 24; uv[j + 1] = pos[i + 2] / 24;
+    }
+    geo.setAttribute('uv', new THREE.BufferAttribute(uv, 2));
     geo.setIndex(new THREE.BufferAttribute(new Uint32Array(idx), 1));
     geo.computeBoundingSphere();
     const m = new THREE.Mesh(geo, mat);
@@ -473,7 +487,15 @@ export class UrbanFull {
       const x0 = -56700, x1 = 19700, z0 = -4700, z1 = 78100, pad = 4000;
       const geo = new THREE.PlaneGeometry((x1 - x0) + pad * 2, (z1 - z0) + pad * 2, 96, 96);
       geo.rotateX(-Math.PI / 2);
-      const mesh = new THREE.Mesh(geo, new THREE.MeshBasicMaterial({ color: 0x7c7a72, side: THREE.DoubleSide }));
+      // [2026-11-27 地面显形] 全域纯色底板 0x7c7a72 就是"紫色地面"元凶。换真实沥青贴图,
+      // 世界尺度平铺 uv(plane 的 uv 是 0..1,按米数换算 repeat),让 8 万米路面有真实颗粒。
+      const TL2 = new THREE.TextureLoader();
+      const texAsphalt = TL2.load('./textures/real/acg_Asphalt025C_Color.webp');
+      texAsphalt.wrapS = texAsphalt.wrapT = THREE.RepeatWrapping;
+      texAsphalt.colorSpace = THREE.SRGBColorSpace;
+      texAsphalt.repeat.set(((x1 - x0) + pad * 2) / 24, ((z1 - z0) + pad * 2) / 24);
+      texAsphalt.anisotropy = 4;
+      const mesh = new THREE.Mesh(geo, new THREE.MeshStandardMaterial({ map: texAsphalt, roughness: 0.92, metalness: 0, side: THREE.DoubleSide }));
       mesh.position.set((x0 + x1) / 2, 0.02, (z0 + z1) / 2);   // 高于水体(-0.02)：陆地路面优先，海面后续用掩码单独铺
       mesh.name = 'urban:roadbed';
       mesh.renderOrder = -1;

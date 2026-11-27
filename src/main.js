@@ -4055,18 +4055,20 @@ function enterCity(cause = 'start') {
      默认出生到真实高楼区 (-13,69 块附近, 邻域 150 栋 >30m 高楼)，一进游戏即见
      天际线。?home=origin 可切回原手工街。坐标取自 urban_manifest.json，非伪造。 */
   const _homeOrigin = /[?&]home=origin/.test(location.search);
-  // 高楼核心区：块 62,91 (12500,18300) 本块含 198m 高楼、邻域 79 栋 >60m、
-  // 最高 234.3m。朝东(+x)即见全城天际线。数据取自 urban_manifest/chunks。
-  let px = _homeOrigin ? startPos.x + 25 : 12500;
-  let pz = _homeOrigin ? startPos.z - 2 : 18300;
+  // [2026-11-27 出生点观感修复] 全量数据实测 (12300,18200) 80-500m内58栋>60m高楼
+  // (最高234m)、且80m内无贴脸楼 —— 站在开阔街区被玻璃塔群环抱,第一印象即迈阿密天际线。
+  let px = _homeOrigin ? startPos.x + 25 : 12300;
+  let pz = _homeOrigin ? startPos.z - 2 : 18200;
   let py = groundAt(px, pz, 30, 0) ?? 0;   // probe real street height（必须 let：避让换点后要重探）
   // [2026-11-26 迈阿密高楼区朝向] 原点手工街朝西(−x)沿街走；高楼区楼群在出生点
   // 东侧(+x)，必须转身朝东，否则一进游戏背对整片城区、只见空地。
   /* [2026-11-26 出生朝向] 正东（-π/2）会把 199m 塔楼怼在鼻尖上，整屏一堵玻璃墙。
      改朝东南 45°（62,91 块 171m + 199m 两栋同时在 75° 视野里），抬头 7°：
      一进游戏看到的是「三栋塔楼夹出的街谷 + 天际线」，不是一面墙。 */
-  input.yaw = _homeOrigin ? Math.PI / 2 : -2.30;
-  input.pitch = _homeOrigin ? -0.12 : 0.12;
+  // [2026-11-27 实测八朝向] (12300,18200) 处 yaw=0.79 能看到两栋带真实玻璃窗的楼+
+  // 街谷纵深;yaw=0 是一整栋弧形玻璃楼。取0.79给"真实迈阿密建筑"第一印象。
+  input.yaw = _homeOrigin ? Math.PI / 2 : 0.79;
+  input.pitch = _homeOrigin ? -0.12 : 0.04;
   /* [全量接替] 出生点避让：真实建筑铺满街区，原主街站位可能正好落在楼体内。
      若当前 200m 块建筑数 > 40，就近换到最近的稀疏块中心（保距 <2km）。 */
   try {
