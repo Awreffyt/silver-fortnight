@@ -176,13 +176,17 @@ void main(){
   vec3 L = normalize(uSunDir);
   float sheen = pow(max(dot(reflect(-L, vec3(0.0,1.0,0.0)), normalize(uCam - w)), 0.0), 12.0);
   asphalt += uSunColor * sheen * 0.055;
-  vec3 open = texture2D(uAsphalt, w.xz / 5.0).rgb * 1.06;
+  // [2026-11-27 黑地修复] 开敞地(plaza)原来铺沥青(均值43→一片黑)。真实城市开敞街区
+  // 是浅色铺装/混凝土，换 PavingStones070(均值140)，2.4m 周期与近处人行道区分尺度。
+  vec3 open = texture2D(uPaving, w.xz / 2.4).rgb * 1.02;
 
-  vec3 base = mix(vec3(0.045,0.047,0.052), curb, 1.0 - foot);
+  // [2026-11-27] 贴墙根部原 vec3(0.045) 近纯黑，光照一乘整圈黑边；提到 0.10 深灰，
+  // 保留"根部接缝"层次但不再像黑洞。
+  vec3 base = mix(vec3(0.10,0.102,0.108), curb, 1.0 - foot);
   base = mix(base, asphalt, street);
   base = mix(base, open, plaza);
   base = mix(base, curb, sidewalk * 0.85);
-  base *= mix(0.62, 1.0, clamp(d / 5.0, 0.0, 1.0));   // 贴墙接触暗化
+  base *= mix(0.78, 1.0, clamp(d / 5.0, 0.0, 1.0));   // 贴墙接触暗化(0.62→0.78,配合浅色基底)
 
   vec3 N = normalize(vNormal);
   vec3 col = base * (uSkyColor * 0.72 + uSunColor * max(N.y,0.0) * 0.42);

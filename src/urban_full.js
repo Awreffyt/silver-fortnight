@@ -489,8 +489,11 @@ export class UrbanFull {
       geo.rotateX(-Math.PI / 2);
       // [2026-11-27 地面显形] 全域纯色底板 0x7c7a72 就是"紫色地面"元凶。换真实沥青贴图,
       // 世界尺度平铺 uv(plane 的 uv 是 0..1,按米数换算 repeat),让 8 万米路面有真实颗粒。
+      // [2026-11-27 黑地修复] 沥青贴图均值 RGB(43,43,40)，铺整城 roadbed 让地面一片黑。
+      // 真实城市基底是浅灰人行道/街区铺装，沥青只属于道路面（nova_urban 街面 shader
+      // 会在 roadbed 之上画道路）。基底换 PavingStones070(均值140,138,130)。
       const TL2 = new THREE.TextureLoader();
-      const texAsphalt = TL2.load('./textures/real/acg_Asphalt025C_Color.webp');
+      const texAsphalt = TL2.load('./textures/real/acg_PavingStones070_Color.webp');
       texAsphalt.wrapS = texAsphalt.wrapT = THREE.RepeatWrapping;
       texAsphalt.colorSpace = THREE.SRGBColorSpace;
       texAsphalt.repeat.set(((x1 - x0) + pad * 2) / 24, ((z1 - z0) + pad * 2) / 24);

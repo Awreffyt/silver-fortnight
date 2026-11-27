@@ -1692,7 +1692,10 @@ function applyPreset(name) {
     // 800m 边界仍有 ~77% 雾遮住剔除面，但 200m 内回到清晰，中景不再糊成蓝墙。
     // [2026-11-26 手机糊白修复] 1.2/cull 在 400m 就 25% 雾、800m 66% 雾，实拍是一片
     // 奶白玻璃。0.95 在 400m 约 12%、剔除边界（1200m）约 50%：远景有雾但不是白墙。
-    const floor = PERF.isMobileUA ? 0.95 / Math.max(shadeR, 900) : 0;
+    // [2026-11-27 去雾] 0.95/900≈0.00106 让手机 400m 就 18% 雾罩、800m 51%，
+    // 用户实测"整个城市像下雾"。降到 0.6：中景(400m)仅 ~7%、800m ~26%，
+    // 剔除边界(1100m)仍 ~45% 雾遮住消失穿帮，且雾色≈天空色，边界不显眼。
+    const floor = PERF.isMobileUA ? 0.6 / Math.max(shadeR, 900) : 0;
     scene.fog.density = fogOn ? Math.max(base, floor) : 0;
   }
   if (p.fog !== undefined) scene.fog.color.set(p.fog);
