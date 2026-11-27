@@ -1,13 +1,17 @@
-// miami_layer.js — 真实城市建筑数据 → NOVA 场景（Y-up）的运行时几何层
+// miami_layer.js — 真实迈阿密建筑数据 → NOVA 场景（Y-up）运行时几何层
 //
-// 零程序生成城市：所有轮廓、高度、洞、区块键都来自 urban_intake.py 导出的
-// miami_buildings.json / miami_chunks.json。高度 unverified 的记录直接挂起，
-// 绝不拿默认值冒充楼高。
+// 设计原则（重写版）：
+//   1. 零程序生成城市：轮廓 / 高度 / 洞 / 区块键全部来自 urban_intake.py 导出的
+//      miami_urban.json + urban_chunks/*.json。heightM 缺失(unverified)直接跳过，
+//      绝不拿默认值冒充楼高。
+//   2. 城市的"像不像"取决于立面细节覆盖率：迈阿密真实数据里 94% 是 <20m 的低层，
+//      旧版把 <20m 全塞进 band 0(无窗白灰泥)，满城光板 → 看起来像空地。
+//      重写版把 8~20m 的低层公寓改用带窗砖石档，让绝大多数楼都有门窗。
+//   3. 照片级外观由 ambientCG/AI 摄影贴图承担；几何只负责真实轮廓 + 世界尺度 UV。
 //
-// 坐标：导入器已把 Z-up 转成 Y-up，pts 是水平面 (X_t, Z_t) 二元组。
-// ExtrudeGeometry 在 XY 平面挤出到 +Z，这里把 Shape 点写成 (x, -z) 后
-// rotateX(-π/2) 得到 (X_t, H, Z_t) —— 旋转 det=+1，绕序/法线/贴图手性保持，
-// 与直接写 (x, z, y) 的镜像变换（det=-1，整片剔正面）彻底分开。
+// 坐标：导入器已把 Z-up 转 Y-up，pts 是水平面 (X_t, Z_t) 二元组。
+// ExtrudeGeometry 在 XY 平面挤出到 +Z，把 Shape 点写成 (x,-z) 后 rotateX(-π/2)
+// 得到 (X_t, H, Z_t)——det=+1，绕序/法线/贴图手性保持。
 import * as THREE from 'three';
 import { mergeGeometries } from 'three/addons/utils/BufferGeometryUtils.js';
 import { ChunkStream } from './nova_chunk_core.js?v=a7u2601';
@@ -15,9 +19,11 @@ import { ChunkStream } from './nova_chunk_core.js?v=a7u2601';
 export const URBAN_DATA_URL = './data/miami_urban.json';
 export const CHUNK_SIZE = 200;
 
-const UV_SCALE = 0.25;   // 每 4 m 一个纹理周期，避免几百米坐标把贴图拉成条纹
+const UV_SCALE = 0.25;   // 每 4 m 一个纹理周期（未走盒投影的兜底几何用）
 
-/** 单栋建筑 → BufferGeometry。返回 null 表示数据缺失，调用方必须跳过。 */
+// ---------------------------------------------------------------------------
+// 单栋建筑 → BufferGeometry
+// ---------------------------------------------------------------------------
 export function buildUrbanGeometry(building) {
   if (!building || !Array.isArray(building.rings) || !building.rings.length) return null;
   const H = building.heightM;
@@ -41,7 +47,7 @@ export function buildUrbanGeometry(building) {
   });
   geo.rotateX(-Math.PI / 2);
   geo.translate(0, building.baseY || 0, 0);
-  // UV 按世界尺度归一，供主城立体贴图管线直接复用
+  // UV 按世界尺度归一，供未走 reproject 的路径直接复用
   const uv = geo.getAttribute('uv');
   if (uv) for (let i = 0; i < uv.count; i++) uv.setXY(i, uv.getX(i) * UV_SCALE, uv.getY(i) * UV_SCALE);
   geo.computeVertexNormals();
@@ -50,6 +56,7 @@ export function buildUrbanGeometry(building) {
   return geo;
 }
 
+// 稳定伪随机：同一 (id,key) 每次得到同样的分档 / 色扰 / UV 偏移。
 function seedOf(id, key) {
   let h = 2166136261;
   const s = String(id == null ? key : id) + '|' + String(key || '');
@@ -57,11 +64,28 @@ function seedOf(id, key) {
   return (h >>> 0) % 4096;
 }
 
-/**
- * 真实贴图 UV 重投影：ExtrudeGeometry 自带 UV 是 (周长, 高度)，铺真实立面会撕裂。
- * 改为世界尺度盒投影 —— 竖直面沿墙展开(u)、按层高累进(v)，水平面按 xz 平面。
- * period = 一张贴图覆盖的物理米数（2470 图内约 15 格窗，格≈3.2 m → 48 m）。
- */
+// 立面分档（重写）：让低层也有窗，提升"城市感"覆盖率。
+//   band 0 : <8m   灰泥（真低矮附属物：车库/围墙/设备房）
+//   band 1 : 8~20m 砖石带窗低层公寓  ← 旧版这里是光板，迈阿密大多数楼
+//   band 2 : 20~60m 混凝土框窗中层
+//   band 3/4/5: >60m 三种玻璃幕墙塔
+function bandOf(heightM, seed) {
+  if (heightM > 60) return 3 + (seed % 3);
+  if (heightM > 20) return 2;
+  if (heightM > 8) return 1;
+  return 0;
+}
+
+// 一张贴图覆盖的物理米数。带窗档统一 48m（14 层×16 开间，每层3.4m/每间3m），
+// 避免把 48m 的图硬塞进一半尺寸导致窗格密度翻倍的马赛克。灰泥档无窗可小些。
+function periodOf(band) {
+  return band === 0 ? 24 : 48;
+}
+
+// ---------------------------------------------------------------------------
+// 真实贴图 UV 重投影：ExtrudeGeometry 自带 UV 是 (周长,高度)，铺立面会撕裂。
+// 改为世界尺度盒投影：竖直面沿墙展开(u)、按层高累进(v)，水平面采样屋顶带。
+// ---------------------------------------------------------------------------
 function reprojectUV(geo, period = 48, seed = 0) {
   if (!Number.isFinite(seed)) seed = 0;
   const pos = geo.getAttribute('position');
@@ -71,39 +95,35 @@ function reprojectUV(geo, period = 48, seed = 0) {
     uv = new THREE.BufferAttribute(new Float32Array(pos.count * 2), 2);
     geo.setAttribute('uv', uv);
   }
-  // 逐栋偏移：同一张贴图铺满全城会形成规则条纹（集装箱感），
-  // 每栋按 id 哈希错开 u/v 起点并随机水平翻转，破坏重复节奏。
-  const offU = ((seed * 0.6180339887) % 1);
-  const offV = ((seed * 0.4142135624) % 1);
+  // 逐栋错开 u/v 起点 + 随机水平翻转，破坏"全城同一张图"的集装箱条纹感。
+  const offU = (seed * 0.6180339887) % 1;
+  const offV = (seed * 0.4142135624) % 1;
   const flip = (seed % 2) ? -1 : 1;
   for (let i = 0; i < pos.count; i++) {
     const x = pos.getX(i), y = pos.getY(i), z = pos.getZ(i);
     const nx = nor ? nor.getX(i) : 0, ny = nor ? nor.getY(i) : 1, nz = nor ? nor.getZ(i) : 0;
-    let u, v;
     if (Math.abs(ny) > 0.72) {
-      // 屋顶/水平面：贴图顶部 v≈0.993 预留了纯灰屋顶带。固定采样这里，
-      // 避免用立面 UV 把玻璃/窗格采到楼顶，斜光下泛青蓝描边。
+      // 屋顶/水平面：固定采样贴图顶部预留的纯灰屋顶带，避免玻璃/窗格
+      // 采到楼顶、斜光下泛青蓝描边。
       uv.setXY(i, 0.5, 0.993);
       continue;
     }
     const L = Math.hypot(nx, nz) || 1;
-    u = (x * (nz / L) - z * (nx / L)) / period;
-    v = y / period;
+    const u = (x * (nz / L) - z * (nx / L)) / period;
+    const v = y / period;
     uv.setXY(i, u * flip + offU, v + offV);
   }
   uv.needsUpdate = true;
-  // [2026-11-26] aoMap 在 Three r152+ 读 uv1（旧 uv2 已废）。没有 uv1 时 AO 采样
-  // 全 0 → 整栋死黑。这里把同一份立面 UV 复制给 uv1，AO 才能对上窗框阴影。
+  // aoMap 在 Three r152+ 读 uv1。复制同一份立面 UV，否则 AO 全采 0 → 整栋死黑。
   if (!geo.getAttribute('uv1')) {
     const a = new Float32Array(uv.count * 2);
     for (let i = 0; i < uv.count; i++) { a[i * 2] = uv.getX(i); a[i * 2 + 1] = uv.getY(i); }
     geo.setAttribute('uv1', new THREE.BufferAttribute(a, 2));
   }
-  // 逐栋色扰：同材质下避免整片同色复制感（±6% 明度 / ±2% 冷暖）
+  // 逐栋色扰：同材质下避免复制粘贴感（明度 0.86~1.12 / 冷暖 ±2.5%）。
   const n = pos.count;
   const col = new Float32Array(n * 3);
-  // [2026-11-26] ±6% 太保守，76 栋连排仍像复制粘贴；放到 0.84~1.12 有街区层次。
-  const lum = 0.84 + ((seed * 0.7548776662) % 1) * 0.28;
+  const lum = 0.86 + ((seed * 0.7548776662) % 1) * 0.26;
   const warm = 1 + (((seed * 0.3183098862) % 1) - 0.5) * 0.05;
   for (let i = 0; i < n; i++) {
     col[i * 3] = lum * warm;
@@ -114,7 +134,9 @@ function reprojectUV(geo, period = 48, seed = 0) {
   return geo;
 }
 
-/** 多边形点包含（射线法），pts 为导入器输出的 (X_t, Z_t) 二元组。 */
+// ---------------------------------------------------------------------------
+// 多边形点包含（射线法），pts 为导入器输出的 (X_t, Z_t) 二元组。
+// ---------------------------------------------------------------------------
 function inRing(pts, px, pz) {
   let inside = false;
   for (let i = 0, j = pts.length - 1; i < pts.length; j = i++) {
@@ -131,14 +153,8 @@ function inSolid(rings, px, pz) {
   return true;
 }
 
-/**
- * 法线探针：顶面 +Y / 底面 −Y / 侧面指向空域，三类都要有且方向正确。
- *
- * 旧版用「相对整体质心朝外」判侧面，遇到带洞轮廓会把洞壁（法线朝洞内，
- * 本来就是正确朝向）误判成朝内，实测 ratio 卡在 0.8 假失败。现在改成
- * 沿法线偏移一点做真实轮廓的点包含测试：Q 落在实体内才算错，落在空域
- * （含洞腔）即正确。判据同时覆盖外壁与洞壁，无需放水阈值。
- */
+// 法线探针：顶面+Y / 底面-Y / 侧面指向空域，三类都要有且方向正确。
+// 沿法线偏移一点做真实轮廓点包含：Q 落实体内才算错，落空域(含洞腔)即正确。
 export function probeNormals(meshes, limit = 40) {
   let up = 0, down = 0, side = 0, outward = 0, checked = 0, bad = 0;
   const a = new THREE.Vector3(), b = new THREE.Vector3(), c = new THREE.Vector3();
@@ -157,15 +173,14 @@ export function probeNormals(meshes, limit = 40) {
       const i2 = index ? index.getX(t * 3 + 2) : t * 3 + 2;
       a.fromBufferAttribute(pos, i0); b.fromBufferAttribute(pos, i1); c.fromBufferAttribute(pos, i2);
       ab.subVectors(b, a); ac.subVectors(c, a); n.crossVectors(ab, ac).normalize();
-      checked++;
       if (!Number.isFinite(n.x + n.y + n.z)) { bad++; continue; }
+      checked++;
       if (n.y > 0.85) up++;
       else if (n.y < -0.85) down++;
       else {
         side++;
         mid.copy(a).add(b).add(c).multiplyScalar(1 / 3);
         if (!rings) {
-          // 无轮廓信息时退化为质心判据，并在结果里标明降级
           g.computeBoundingBox(); const ctr = new THREE.Vector3();
           g.boundingBox.getCenter(ctr);
           if (n.dot(mid.clone().sub(ctr).setY(0)) > 0) outward++;
@@ -182,10 +197,9 @@ export function probeNormals(meshes, limit = 40) {
                       && (side === 0 || outward / side > 0.9) };
 }
 
-/**
- * 挂载真实城市层。data 为空或全挂起时返回空壳，零伪造。
- * opts.materialFactory(building) 可接管材质（主城 relief 管线从这里接）。
- */
+// ---------------------------------------------------------------------------
+// 挂载真实城市层（整份单文件数据路径）。data 为空/全挂起时返回空壳，零伪造。
+// ---------------------------------------------------------------------------
 export function mountUrbanLayer(scene, data, opts = {}) {
   const buildings = (data && data.buildings) || [];
   const chunks = (data && data.chunks) || [];
@@ -194,7 +208,7 @@ export function mountUrbanLayer(scene, data, opts = {}) {
   const skipped = { noHeight: 0, noRings: 0, buildFail: 0 };
   const radius = opts.radius || 1050;
   const mat = opts.material || new THREE.MeshStandardMaterial({
-    color: 0xd8c9ad, roughness: 0.86, metalness: 0.04, side: THREE.FrontSide,  // [迈阿密] 暖白灰泥，去冷蓝
+    color: 0xd8c9ad, roughness: 0.86, metalness: 0.04, side: THREE.FrontSide,
   });
 
   for (const ck of chunks) {
@@ -205,7 +219,6 @@ export function mountUrbanLayer(scene, data, opts = {}) {
     groups.set(ck.key, g);
     scene.add(g);
   }
-  // 数据只有 buildings 没给 chunks 时，按记录自带 chunkKeys 现建组
   const ensureGroup = key => {
     let g = groups.get(key);
     if (!g) {
@@ -224,14 +237,12 @@ export function mountUrbanLayer(scene, data, opts = {}) {
     try { geo = buildUrbanGeometry(b); }
     catch (e) { skipped.buildFail++; continue; }
     if (!geo) { skipped.buildFail++; continue; }
-    // 跨块轮廓几何只建一次，挂到主区块；其余区块键只做登记，避免重复绘制
     const primary = (b.chunkKeys && b.chunkKeys[0]) || '0,0';
     const mesh = new THREE.Mesh(geo, opts.materialFactory ? opts.materialFactory(b) : mat);
     mesh.name = 'urban:' + b.id;
     mesh.castShadow = false; mesh.receiveShadow = false;
     mesh.userData = { id: b.id, chunkKeys: b.chunkKeys, heightSource: b.heightSource,
-                      heightM: b.heightM, crossBlock: !!b.crossBlock,
-                      rings: b.rings };   // 法线探针按真实轮廓判内外，洞壁朝洞内属正确
+                      heightM: b.heightM, crossBlock: !!b.crossBlock, rings: b.rings };
     ensureGroup(primary).add(mesh);
     meshes.push(mesh);
   }
@@ -273,14 +284,9 @@ export function mountUrbanLayer(scene, data, opts = {}) {
   return api;
 }
 
-/**
- * 600MB 级 chunked 运行时：按相机位置懒加载 200m 区块分片。
- *
- * import 侧 StreamExporter 输出 urban_manifest.json（只含区块元数据）
- * + urban_chunks/*.json（每片只含本区块建筑）。这里预建空 Group，
- * 进入半径才 fetch，离开只隐藏，几何常驻不重复请求。
- * 单次内存 = 视野内若干区块，而非整座城市。
- */
+// ---------------------------------------------------------------------------
+// 分块运行时：按相机位置懒加载 200m 区块，进入半径才 fetch，离场释放显存。
+// ---------------------------------------------------------------------------
 export class ChunkedUrbanLayer {
   constructor(scene, manifest, opts = {}) {
     this.scene = scene;
@@ -294,22 +300,21 @@ export class ChunkedUrbanLayer {
     this.seen = new Set();
     this.requests = 0;
     this.errors = [];
-    this.bucketCache = new Map();   // file → Promise<json>，同桶多区块只发一次请求
-    this.meshByKey = new Map();     // key → 合并后的 1 个 Mesh
+    this.bucketCache = new Map();   // file → Promise<json>，同桶多块只请求一次
+    this.meshByKey = new Map();
     this.built = 0;
     this.concurrency = opts.concurrency || 8;
     this.skipped = { duplicate: 0, noHeight: 0, buildFail: 0, unloaded: 0 };
-    /* [2026-11-26 摄影级材质 v3] 六档全部替换为 ambientCG 摄影测量扫描实拍 PBR，
-       2048² 原生，CC0 可商用。每档一张独立贴图（不是一张图染三种色），
-       迈阿密组合：玻璃塔 Facade001/005/006 + 砖石公寓 Facade018A/020A + Deco 白灰泥。
-       normal/roughness/AO 走原生 JPG（webp 在软渲染后端会死黑，已验证两次）。 */
+
+    // 六档照片级材质。map 是照片级迈阿密立面 Color；normal/roughness/位移
+    // 沿用 ambientCG CC0 摄影测量数据，保证窗洞凹凸的真实立体感。
     const TL = new THREE.TextureLoader();
-    // [2026-11-27 显存记账] 全局贴图显存表：uuid -> 字节。跨 chunk 去重，
-    // chunk 级计数会把共享贴图重复计几十次(实测 11.6GB 假账)。
+    // 全局贴图显存记账：uuid→字节，跨 chunk 去重（chunk 级会把共享贴图
+    // 重复计几十次，实测 11.6GB 假账）。
     if (!globalThis.__texMemMap) { globalThis.__texMemMap = new Map(); globalThis.__texMemTotal = 0; }
     const tex = (f, srgb) => {
-      // [缓存修复] 贴图内容变了但同名，服务端 max-age 86400 会让手机一直拿旧图。
-      // 加版本号强制刷新；以后改图只改这个常量。
+      // 贴图内容变了但同名时,服务端 max-age 会让手机一直拿旧图；
+      // 改图只改这个版本号常量即可强制刷新。
       const t = TL.load('./textures/real/' + f + '?v=20261127sharp', loaded => {
         try {
           const img = loaded && loaded.image;
@@ -326,33 +331,24 @@ export class ChunkedUrbanLayer {
       if (srgb) t.colorSpace = THREE.SRGBColorSpace;
       return t;
     };
-    // [2026-11-26 性能] 移动端判定：iPhone XR 等 A12 设备 fragment 预算极紧，
-    // GTA6 式 GPU POM(32次/像素) 直接打爆。改走 CPU 预烘焙法线(BakedN)——
-    // 窗洞凹凸在加载前由 CPU 从位移图算好，GPU 每像素只采样 1 次。
+    // 移动端用 CPU 预烘焙法线（窗洞凹凸加载前算好，GPU 每像素只采样 1 次），
+    // 桌面端保留原生法线 + GPU POM 视差。
     const MOBILE_RT = !!(globalThis.__mcPerf && globalThis.__mcPerf.isMobileUA);
-    const BAKED = ['Facade001','Facade005','Facade006'];
-    // name = 贴图资产名；rough = 基准粗糙度；metal = 金属度（玻璃幕框用）
+    const BAKED = ['Facade001', 'Facade005', 'Facade006'];
     const mkMat = (name, rough = 0.84, metal = 0.0) => {
       const m = new THREE.MeshStandardMaterial({
         map: tex('acg_' + name + '_Color.jpg', true),
         normalMap: tex('acg_' + name + (MOBILE_RT && BAKED.includes(name) ? '_BakedN' : '_NormalGL') + '.jpg', false),
-        normalScale: MOBILE_RT
-          ? new THREE.Vector2(0.85, 0.85)   // CPU烘焙法线：直接编码窗洞坡度，需更强才出立体感
-          : new THREE.Vector2(0.45, 0.45),  // 桌面端保留原生法线+GPU POM
+        normalScale: MOBILE_RT ? new THREE.Vector2(0.85, 0.85) : new THREE.Vector2(0.45, 0.45),
         roughnessMap: tex('acg_' + name + '_Roughness.jpg', false),
-        // 部分扫描资产无 AO 通道；缺档时用 1×1 纯白纹理（AO=1，不改变光照），
-        // 避免 TextureLoader 404 拖慢首屏且材质仍能统一走 uv1。
-        aoMap: (['Facade001','Facade005','Facade006'].includes(name)
-          ? (() => { const t = new THREE.DataTexture(new Uint8Array([255,255,255,255]), 1, 1); t.needsUpdate = true; return t; })()
+        aoMap: (['Facade001', 'Facade005', 'Facade006'].includes(name)
+          ? (() => { const t = new THREE.DataTexture(new Uint8Array([255, 255, 255, 255]), 1, 1); t.needsUpdate = true; return t; })()
           : tex('acg_' + name + '_AmbientOcclusion.jpg', false)),
-        aoMapIntensity: 0.45,   // 同上：扫描图已含接触阴影，AO 再叠就死黑
+        aoMapIntensity: 0.45,
         color: 0xffffff, roughness: rough, metalness: metal,
         vertexColors: true, side: THREE.FrontSide,
       });
-      // [GTA6 式落地] 真实位移图（ambientCG Displacement）驱动 POM 视差遮蔽：
-      // 照片负责 1:1 外观，位移图让窗洞真凹进去、走近有视差、斜光有自遮挡。
-      // 这是「一张真实照片 100% 立体」的核心。位移图缺失时 POM 自动关闭。
-      const hasDisp = !MOBILE_RT && BAKED.includes(name);   // 移动端关闭 GPU POM
+      const hasDisp = !MOBILE_RT && BAKED.includes(name);
       const disp = hasDisp ? tex('acg_' + name + '_Displacement.jpg', false) : null;
       m.userData.pom = hasDisp;
       m.userData.dispTex = hasDisp ? disp : null;
@@ -361,79 +357,68 @@ export class ChunkedUrbanLayer {
         sh.uniforms.uPomScale = { value: hasDisp ? 0.030 : 0.0 };
         sh.fragmentShader = sh.fragmentShader
           .replace('#include <common>',
-            `#include <common>
-             uniform sampler2D uDispMap;
-             uniform float uPomScale;
-             float pomDepth(vec2 uv){ return texture2D(uDispMap, uv).r; }`)
-          // 在 map_fragment 之前做 POM：算出视差偏移后的 uv，替换 vMapUv
-          .replace('#include <map_fragment>',
-            `
-             #ifdef USE_MAP
-             vec2 pomUv = vMapUv;
-             if (uPomScale > 0.0) {
-               // 视线在切线空间的方向（用屏幕导数重建 TBN）
-               vec3 dpdx = dFdx(-vViewPosition);
-               vec3 dpdy = dFdy(-vViewPosition);
-               vec2 dtdx = dFdx(vMapUv);
-               vec2 dtdy = dFdy(vMapUv);
-               vec3 T = normalize(dpdx * dtdy.y - dpdy * dtdx.y);
-               vec3 B = normalize(-dpdx * dtdx.x + dpdy * dtdx.y);
-               vec3 N = normalize(vNormal);
-               T = normalize(T - N * dot(N, T));
-               B = normalize(cross(N, T));
-               vec3 V = normalize(vViewPosition);
-               vec2 vTangent = vec2(dot(V, T), dot(V, B));
-               float layers = mix(28.0, 12.0, clamp(abs(V.z), 0.0, 1.0));
-               float layerH = 1.0 / layers;
-               float curDepth = 1.0;
-               vec2 stepUv = vTangent * (uPomScale / layers) / max(abs(V.z), 0.35);
-               vec2 pomCur = vMapUv;
-               for (int i = 0; i < 32; i++) {
-                 float h = 1.0 - pomDepth(pomCur);
-                 if (h >= curDepth) break;
-                 pomCur -= stepUv;
-                 curDepth -= layerH;
-               }
-               // 层间插值，消除阶梯
-               float hAfter = 1.0 - pomDepth(pomCur);
-               float hBefore = curDepth + layerH;
-               float w = (hBefore - hAfter) / max(hBefore - curDepth, 1e-4);
-               pomUv = pomCur - stepUv * (1.0 - clamp(w, 0.0, 1.0));
-             }
-             vec4 sampledDiffuseColor = texture2D(map, pomUv);
-             #ifdef DECODE_VIDEO_TEXTURE
-               sampledDiffuseColor = sRGBTransferEOTF(sampledDiffuseColor);
-             #endif
-             diffuseColor *= sampledDiffuseColor;
-             // [2026-11-27 白塔修复] 旧 gamma 0.78 + lum*0.14 把深灰玻璃洗成米白塔。
-             // 摄影贴图已含真实反照率,只做极轻微暖色校正,不再整体提亮。
-             // float lum = dot(diffuseColor.rgb, vec3(0.299,0.587,0.114));
-             diffuseColor.rgb = clamp(pow(diffuseColor.rgb, vec3(0.96)) * vec3(1.02,1.0,0.97), 0.0, 1.0);
-             #endif
-             `);
+            '#include <common>\n uniform sampler2D uDispMap;\n uniform float uPomScale;\n float pomDepth(vec2 uv){ return texture2D(uDispMap, uv).r; }')
+          .replace('#include <map_fragment>', `
+            #ifdef USE_MAP
+            vec2 pomUv = vMapUv;
+            if (uPomScale > 0.0) {
+              vec3 dpdx = dFdx(-vViewPosition);
+              vec3 dpdy = dFdy(-vViewPosition);
+              vec2 dtdx = dFdx(vMapUv);
+              vec2 dtdy = dFdy(vMapUv);
+              vec3 T = normalize(dpdx * dtdy.y - dpdy * dtdx.y);
+              vec3 B = normalize(-dpdx * dtdx.x + dpdy * dtdx.y);
+              vec3 N = normalize(vNormal);
+              T = normalize(T - N * dot(N, T));
+              B = normalize(cross(N, T));
+              vec3 V = normalize(vViewPosition);
+              vec2 vTangent = vec2(dot(V, T), dot(V, B));
+              float layers = mix(28.0, 12.0, clamp(abs(V.z), 0.0, 1.0));
+              float layerH = 1.0 / layers;
+              float curDepth = 1.0;
+              vec2 stepUv = vTangent * (uPomScale / layers) / max(abs(V.z), 0.35);
+              vec2 pomCur = vMapUv;
+              for (int i = 0; i < 32; i++) {
+                float h = 1.0 - pomDepth(pomCur);
+                if (h >= curDepth) break;
+                pomCur -= stepUv;
+                curDepth -= layerH;
+              }
+              float hAfter = 1.0 - pomDepth(pomCur);
+              float hBefore = curDepth + layerH;
+              float w = (hBefore - hAfter) / max(hBefore - curDepth, 1e-4);
+              pomUv = pomCur - stepUv * (1.0 - clamp(w, 0.0, 1.0));
+            }
+            vec4 sampledDiffuseColor = texture2D(map, pomUv);
+            #ifdef DECODE_VIDEO_TEXTURE
+              sampledDiffuseColor = sRGBTransferEOTF(sampledDiffuseColor);
+            #endif
+            diffuseColor *= sampledDiffuseColor;
+            diffuseColor.rgb = clamp(pow(diffuseColor.rgb, vec3(0.96)) * vec3(1.02,1.0,0.97), 0.0, 1.0);
+            #endif
+            `);
         m.userData.pomShader = sh;
       };
       return m;
     };
-    // 六档：0 低层白灰泥 / 1 中层砖石 / 2 中层混凝土框 / 3-5 三种真玻璃幕
+    // 六档：0 低矮灰泥 / 1 带窗砖石低层 / 2 混凝土中层 / 3-5 三种玻璃塔
     this.matStucco = opts.material || mkMat('PaintedPlaster006', 0.96);
-    this.matMixed  = this.matStucco === opts.material ? this.matStucco : mkMat('Facade018A', 0.86);
+    this.matMixed = this.matStucco === opts.material ? this.matStucco : mkMat('Facade018A', 0.86);
     this.matConcrete = this.matStucco === opts.material ? this.matStucco : mkMat('Facade020A', 0.82);
-    this.matGlass  = this.matStucco === opts.material ? this.matStucco : mkMat('Facade001', 0.30, 0.12);
-    this.matGlassB = this.matStucco === opts.material ? this.matStucco : mkMat('Facade005', 0.34, 0.10);
-    this.matGlassC = this.matStucco === opts.material ? this.matStucco : mkMat('Facade006', 0.38, 0.08);
-    // [2026-11-26] 摄影测量 Color 图烘焙了当天光照，叠上游戏日间 sun/hemi 后偏暗发青。
-    // 用 material.color 做线性提亮补偿（不改原图像素，保持照片级细节）。
+    // [2026-11-27 黑楼修复] 玻璃塔旧版 metalness 0.08~0.12：无 envMap 或软渲染下
+    // 金属没有漫反射、只反射环境，环境贴图未就绪时就整栋纯黑剪影。归零金属度后
+    // 玻璃材质靠贴图本身的高光/反射烘焙表现质感，任何设备都不再黑楼。
+    this.matGlass = this.matStucco === opts.material ? this.matStucco : mkMat('Facade001', 0.30, 0.0);
+    this.matGlassB = this.matStucco === opts.material ? this.matStucco : mkMat('Facade005', 0.34, 0.0);
+    this.matGlassC = this.matStucco === opts.material ? this.matStucco : mkMat('Facade006', 0.38, 0.0);
+    // 照片贴图已含真实反照率，只做极轻微暖偏，不再整体放大（避免白塔过曝）。
     for (const m of [this.matStucco, this.matMixed, this.matConcrete, this.matGlass, this.matGlassB, this.matGlassC]) {
-      // [2026-11-27 白塔修复] 旧 setRGB(1.55,1.45,1.28) 把深灰玻璃×1.55洗成白塔。
-      // 贴图本身已是真实反照率(玻璃幕墙均值~0.3),只需极轻微暖偏,不再整体放大。
       if (m && m.color && m !== opts.material) m.color.setRGB(1.04, 1.0, 0.95);
     }
     this.material = this.matStucco;
     for (const c of manifest.chunks || []) this.byKey.set(c.key, c);
   }
 
-  /** nova_urban._decorateNew / state() 遍历用：展平到真实 Mesh（每块现在是 1~3 个材质带）。 */
   get meshes() {
     const out = [];
     for (const o of this.meshByKey.values()) {
@@ -458,7 +443,7 @@ export class ChunkedUrbanLayer {
     return g;
   }
 
-  /** 一块 = 一次 merge = 1 个 draw call。86 万栋摊到 3 万块，视野内仅数十个 draw。 */
+  // 旧单文件加载路径（无 chunked 清单时的兜底）
   async load(key) {
     if (this.loaded.has(key) || this.loading.has(key)) return;
     const c = this.byKey.get(key);
@@ -510,10 +495,8 @@ export class ChunkedUrbanLayer {
     }
   }
 
-  /** 离场即释放显存：几何常驻会把 86 万栋堆成上 GB。 */
   _unload(key) {
     if (this.chunkRings) this.chunkRings.delete(key);
-    // [LCR] 先通知光追释放对应 BLAS，再释放光栅几何（顺序无关，桥在降级时 no-op）
     if (this.lcr && this.lcr.unmount) {
       try { this.lcr.unmount(key); } catch (e) {}
     }
@@ -526,27 +509,20 @@ export class ChunkedUrbanLayer {
     this.skipped.unloaded++;
   }
 
-  /** ChunkStream 的挂载路径：rows 直接来自桶解码，构建合并网格。同步返回。 */
+  // ChunkStream 挂载路径：rows 来自桶解码，按 6 档构建合并网格（6 个 draw call）。
   _buildChunkMesh(key, rows) {
     if (!Array.isArray(rows) || !rows.length) return null;
     const c = this.byKey.get(key);
     if (!c) return null;
-    const buckets = [[], [], [], [], [], []];   // 0 灰泥低层 / 1-2 中层 / 3-5 三种真玻璃塔
+    const buckets = [[], [], [], [], [], []];
     let builtN = 0;
     for (const b of rows) {
       if (!(b.heightM > 0)) { this.skipped.noHeight++; continue; }
       const bg = buildUrbanGeometry(b);
       if (!bg) { this.skipped.buildFail++; continue; }
-      const hi = b.heightM > 60;
       const sd = seedOf(b.id, key);
-      /* [2026-11-26 1:1 尺度修复] Facade 贴图是 gen_facade.py 按 48m×48m 真实尺度画的
-         （14 层 × 16 开间 → 每层 3.4m、每开间 3.0m，都是真实建筑模数）。
-         之前 period=26/24/12 把 48m 的图硬塞进一半尺寸 → 窗格密度翻倍 →
-         满屏密集小格马赛克，这正是「楼不像真楼」的根因。改回 48m 设计尺度。
-         低层灰泥无窗格，纹理尺度可小些；有窗的三档统一 48m。 */
-      const band = hi ? (3 + (sd % 3)) : (b.heightM > 20 ? 1 + (sd % 2) : 0);
-      const period = band === 0 ? 24 : 48;
-      reprojectUV(bg, period, sd);
+      const band = bandOf(b.heightM, sd);
+      reprojectUV(bg, periodOf(band), sd);
       buckets[band].push(bg);
       builtN++;
     }
@@ -554,9 +530,7 @@ export class ChunkedUrbanLayer {
     const g = this._ensureGroup(key);
     if (!g) { buckets.forEach(a => a.forEach(x => x.dispose())); return null; }
     const mats = [this.matStucco, this.matMixed, this.matConcrete, this.matGlass, this.matGlassB, this.matGlassC];
-    // [2026-11-26 街面距离场修复] 合并网格只保留 band 标记，真实轮廓丢了；
-    // 街面着色器拿不到 rings 就只能按「全开敞 24m」画，整片街区变成一块灰板。
-    // 这里把本块的真实轮廓留在 layer 上，供 _ensureGround 建距离场。
+    // 保留本块真实轮廓供街面着色器建距离场，避免整片街区变灰板。
     this.chunkRings = this.chunkRings || new Map();
     this.chunkRings.set(key, rows.map(b => b && b.rings).filter(Boolean));
     const holder = new THREE.Group();
@@ -585,14 +559,12 @@ export class ChunkedUrbanLayer {
     this.meshByKey.set(key, holder);
     this.loaded.add(key);
     this.built += builtN;
-    // [LCR] 同步喂给光追增强层（桥未就绪/降级时内部 no-op，绝不影响光栅化）
     if (this.lcr && this.lcr.mount) {
-      try { this.lcr.mount(key, holder, c); } catch (e) { /* 光追异常绝不冒泡到游戏 */ }
+      try { this.lcr.mount(key, holder, c); } catch (e) {}
     }
     return holder;
   }
 
-  /** 启用 a7u 区块流送调度器（滞回 + 预算 + 预取 + 退避）。 */
   enableStream(o = {}) {
     if (this.stream) return this.stream;
     const self = this;
@@ -603,13 +575,7 @@ export class ChunkedUrbanLayer {
       onMount(key, rows) {
         const mesh = self._buildChunkMesh(key, rows);
         if (!mesh) return { object: null, buildings: 0, triangles: 0, geometryMB: 0 };
-        // [2026-11-26 致命修复] _buildChunkMesh 返回的是 Group（最多 3 条材质带），
-        // 旧代码 mesh.geometry.getAttribute 必然抛 "reading 'getAttribute'"，
-        // 每块装配都失败 → 流送调度器判定挂载失败、永不推进 → 出生点整片无楼。
-        // 统计量改从 userData 读（_buildChunkMesh 已写好 triangles/verts）。
         const ud = mesh.userData || {};
-        // [2026-11-27 显存修复] 预算 textureMB 直接取全局去重表真实值
-        // (贴图加载回调已登记, 见上方 tex())。chunk 级统计会把共享贴图重复计几十次。
         const textureMB = +((globalThis.__texMemTotal || 0) / 1048576).toFixed(2);
         return {
           object: mesh, buildings: ud.buildings || rows.length,
@@ -623,7 +589,6 @@ export class ChunkedUrbanLayer {
     return this.stream;
   }
 
-  /** 每帧入口：由 nova_urban.update 驱动（120ms 节流）。 */
   streamTick(cameraPos, dtMs, frameMs) {
     if (!this.stream) return null;
     this.stream.setCamera(cameraPos.x, cameraPos.z, 0, 1, dtMs || 16.7);
@@ -652,9 +617,6 @@ export class ChunkedUrbanLayer {
     return { visible, want, pending: want.filter(k => !this.loaded.has(k)) };
   }
 
-  // [2026-11-26 预取修复] 加载半径 = 可视半径的 1.35 倍：
-  // 走到 cull 边缘前，下一批楼已开始下载（1~2MB JSON + 解析要 2~4 秒），
-  // 否则就会出现「走出那片区域后等好几秒楼房渲染不出来」。
   async updateAndLoad(cameraPos, radius = Math.round(this.radius * 1.35)) {
     const s = this.update(cameraPos, radius);
     const q = s.pending.slice();
@@ -668,7 +630,7 @@ export class ChunkedUrbanLayer {
   normalsProbe() { return probeNormals(this.meshes); }
 
   state() {
-    const meshes = this.meshes;   // 已展平为真实 Mesh（Group → children）
+    const meshes = this.meshes;
     return {
       brand: 'NOVA.urban', mode: 'chunked.merged',
       chunkCount: this.groups.size, loadedChunks: this.loaded.size,
@@ -692,7 +654,7 @@ export class ChunkedUrbanLayer {
   }
 }
 
-/** 主城启动钩子：优先 chunked 清单，回退单文件；两者缺失时静默跳过。 */
+// 主城启动钩子：优先 chunked 清单，回退单文件；两者缺失时静默跳过。
 export async function tryMountUrban(scene, opts = {}) {
   const base = opts.base || './data/';
   const mfUrl = opts.manifestUrl || (base + 'urban_manifest.json');
@@ -702,12 +664,14 @@ export async function tryMountUrban(scene, opts = {}) {
       const mf = await r.json();
       if (mf && mf.mode === 'chunked' && Array.isArray(mf.chunks) && mf.chunks.length) {
         const layer = new ChunkedUrbanLayer(scene, mf, { ...opts, base });
-        // a7u 流送调度器：滞回 + 预算 + 预取 + 桶合并，移动时持续加载/卸载
         try {
           layer.enableStream({ tier: opts.streamTier || 'mobile' });
           layer.streamTick(opts.startPos || new THREE.Vector3(0, 0, 0), 16.7, 16.7);
         } catch (e) {
-          layer.stream = null;      // 索引校验失败 → 回退旧 updateAndLoad 路径
+          // 记录真实异常，便于定位（曾经静默吞掉导致 stream=null 却查不到原因）
+          layer.errors.push({ streamInit: String(e && e.message || e).slice(0, 240),
+                              stack: String(e && e.stack || '').slice(0, 600) });
+          layer.stream = null;
           await layer.updateAndLoad(opts.startPos || new THREE.Vector3(0, 0, 0),
                                     opts.radius || 1050);
         }

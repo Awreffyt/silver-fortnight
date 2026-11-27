@@ -127,9 +127,8 @@ const PERF = (() => {
     // [2026-11-26 iPhone XR 卡崩修复] 2.0×DPR 在 2x 屏等于渲染 4 倍像素
     // （828×1792 CSS → 1656×3584），A12 fragment 直接饱和；配合已关的 POM，
     // DPR 降到 1.15 仍清晰（烘焙法线保立体感），像素量减少约 3 倍。cull 同步收紧。
-    // [2026-11-27 去糊] 1.15 是硬上限:自适应RENDER_SCALE最高只能回1.0→DPR永远锁1.15,
-    // 只渲染476×1030再拉伸到全屏(原生1/3像素),整屏糊。抬到1.5(设置里本就是1.5),
-    // 自适应RENDER_SCALE继续兜底:帧率够吃满1.5、掉帧自动降,兼顾清晰与XR帧率。
+    // [2026-11-27 卡退回退] 1.5 在真机转视角时像素量+1.7倍,区块集中加载直接卡退。
+    // 回退到 1.15 保稳定;清晰度改由近景贴图2048+各向异性16承担,不再靠堆渲染分辨率。
     mobile:    { composer: false, bloom: false, dprCap: 1.5, cull: 1100, shadows: false, msaa: false },  // [2026-11-26 城市空修复] 700把真实城市圈(1208m)砍掉4成→视野外全是空地; 远景走AABB代理成本极低,拉回1100
     // 低端机（deviceMemory < 4）：DPR 再降，剔除半径收紧
     // [a7i] 0.85 → 1.0：0.85 在 3x 屏上等于整屏糊一层灰，低端机也至少要 1:1 像素。
@@ -4166,13 +4165,33 @@ function enterCity(cause = 'start') {
   // [2026-11-26 出生即空城修复] 城市流送必须立刻对准出生点：入场时相机是从原点
   // 滑过来的，队列里全是沿途分片；不对准的话，出生点周围 900m 的 40+ 块要排在
   // 几十个失效请求之后，手机玩家进门先看到一片空地 + 旧 prefab 白房。
-  try {
-    const S = window.__miami && window.__miami.stream;
+  /* [2026-11-27 城市空根因修复] 旧代码只在 stream 存在时对准出生点。实测 stream
+     在部分情况下为 null（回退老路径），于是出生点这 900m 的块从不对准 ——
+     __miami 从原点(0,0,0)加载了 120 块，玩家站在 (12300,18200) 看到的全是空地，
+     visibleChunks=0。这里无论有无 stream 都必须把加载中心对准出生点。 */
+  const _aimSpawn = () => {
+    const L = window.__miami;
+    if (!L) return false;
+    const S = L.stream;
     if (S) {
       S.setCamera(px, pz, 1, 0, 16);
       S.io.cancelAll();
       S.tick(performance.now(), 16);
-      if (window.__novaUrban) window.__novaUrban.update(new THREE.Vector3(px, py + 1.35, pz), 16.7);
+    } else if (typeof L.updateAndLoad === 'function') {
+      // 老路径回退：先把之前从原点加载的块全部卸载，再对出生点重新加载。
+      for (const k of [...L.loaded]) L._unload(k);
+      L.updateAndLoad(new THREE.Vector3(px, 0, pz), L.radius || 1300);
+    }
+    if (window.__novaUrban) window.__novaUrban.update(new THREE.Vector3(px, py + 1.35, pz), 16.7);
+    return true;
+  };
+  try {
+    if (!_aimSpawn()) {
+      // 层还在异步挂载：等它就绪后再对准一次（覆盖 stream 建立/回退两种结果）。
+      const _t0 = Date.now();
+      const _waitAim = setInterval(() => {
+        if (_aimSpawn() || Date.now() - _t0 > 12000) clearInterval(_waitAim);
+      }, 400);
     }
   } catch (e) {}
   ctrl.pos.set(px, py + 0.2, pz);

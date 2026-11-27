@@ -1,14 +1,20 @@
-// nova_chunk_core.js — 区块加载/卸载核心调度器（手写）
-// NOVA a7u · 面向全量 863,196 栋 / 上万 200m 区块的常驻集管理器。
+// nova_chunk_core.js — 区块加载/卸载核心调度器（逐字重写）
+// NOVA · 面向全量 863,196 栋 / 上万 200m 区块的常驻集管理器。
 //
 // 职责边界：
-//   - 决定「哪些块该在内存里」（常驻集），不负责建几何（交给 miami_layer）
+//   - 只决定「哪些块该在内存里」（常驻集），不建几何（交给 miami_layer）
 //   - 不碰 WebGL 上下文、不碰 DOM、不改贴图账本
-//   - 所有几何/显存的真实释放由调用方注入 disposer，本层只发指令
+//   - 几何/显存真实释放由调用方注入的 onUnmount/onMount 完成，本层只发指令
 //   - 缺 manifest / 索引校验失败时整体不挂载，零请求、零伪造城市
 //
-// 热路径约定：tick() 每帧调用，内部零 new（除状态迁移必须的极小对象），
-// 环形缓冲复用，避免 GC 造成的周期性长帧。
+// 热路径约定：tick() 每帧调用，内部零分配（除状态迁移必需的小对象），
+// 环形缓冲复用，避免 GC 造成周期性长帧。
+//
+// 加载流畅的关键（重写保持）：
+//   - 位置跳变(瞬移/入场)时中止在途请求、清旧队列，避免新位置排队等旧请求
+//   - decode 完成不立即同步构建，先入 pendingMounts，每帧按 mountBudgetMs
+//     逐个消化 —— 转视角时一批块同时 decode 完不会一帧卡死
+//   - textureMB 取全局去重表当前值(非累加)，跨 chunk 共享贴图不重复记账
 
 import {
   CS, CS_NAME, canTransition, TIERS, tierFor, makeGovernor, governorSample,
@@ -74,7 +80,7 @@ class Telemetry {
 function makeEntry(rec) {
   return {
     key: rec.key,
-    rec,                       // 预计算索引里的冻结记录
+    rec,
     state: CS.UNLOADED,
     score: 0,
     distM: 0,
@@ -86,7 +92,7 @@ function makeEntry(rec) {
     triangles: 0,
     textureMB: 0,
     geometryMB: 0,
-    object: null,              // 调用方注入的 scene object（弱引用语义，不持有所有权）
+    object: null,
     bucketId: rec.bucket,
     pinned: false,
     visible: false,
@@ -99,29 +105,28 @@ function makeEntry(rec) {
 export class ChunkStream {
   /**
    * @param {object} o
-   *  o.manifest    真实 urban_manifest.json（必须是 chunked，含 chunks[]）
+   *  o.manifest    真实 urban_manifest.json（必须 chunked，含 chunks[]）
    *  o.tier        流送档位名或 TIERS 对象
    *  o.base        数据目录
    *  o.fetchImpl   可注入（验收用）
    *  o.onMount(key, rows, rec) -> {object, buildings, triangles, textureMB, geometryMB}
-   *  o.onUnmount(key, object)  -> 真正 dispose，调用方负责
+   *  o.onUnmount(key, object, reason) -> 真正 dispose，调用方负责
    *  o.onBudget(b) 预算变化回调（可选）
    */
   constructor(o) {
     this.manifest = o.manifest;
     this.tier = typeof o.tier === 'string' ? (TIERS[o.tier] || TIERS.mobile) : (o.tier || TIERS.mobile);
     this.onMount = o.onMount || (() => null);
-    // [2026-11-26 转视角帧率修复] onMount(几百楼几何挤出+合并)每块 40~80ms 且完全同步。
-    // 旧实现 decode 一完成就在回调里直接构建——转视角时一批块同时 decode 完，
-    // 一帧内连跑十几个 onMount → 主线程卡 500~1000ms → 帧率直接跌到 1。
-    // 改为构建队列：decode 完成先入队，每帧按时间预算逐个消化（楼逐波浮现）。
+    // onMount(几百楼几何挤出+合并)每块 40~80ms 且完全同步。decode 一完成就
+    // 同步构建会让一批块同帧 decode 完时连跑十几个 onMount → 主线程卡 500~1000ms。
+    // 改为构建队列：decode 完成先入队，每帧按时间预算逐个消化。
     this.pendingMounts = [];
     this.mountBudgetMs = o.mountBudgetMs || 12;
     this.onUnmount = o.onUnmount || (() => {});
     this.onBudget = o.onBudget || null;
     this.onError = o.onError || null;
 
-    // 索引全量复算：不一致就拒绝启用
+    // 索引全量复算：不一致就拒绝启用，绝不造城市。
     this.check = recalcCheck(this.manifest);
     if (!this.check.ok) {
       throw new Error('[chunkStream] 索引复算失败 ' + this.check.totalErrors +
@@ -135,11 +140,11 @@ export class ChunkStream {
     this.cam = { x: 0, z: 0, fx: 0, fz: 1, vx: 0, vz: 0, speed: 0 };
     this.prevCam = { x: 0, z: 0 };
 
-    // 所有块（惰性建 entry，避免开局就 new 13,743 个对象）
+    // 所有块惰性建 entry（避免开局 new 上万个对象）
     this.entries = new Map();
-    this.resident = new Map();          // key -> entry
+    this.resident = new Map();
     this.failed = new Map();
-    this.order = [];                    // Hilbert 序缓存（引用 idx.byHilbert）
+    this.order = [];
 
     this.governor = makeGovernor(this.tier);
     this.budget = makeBudget(this.tier);
@@ -174,7 +179,7 @@ export class ChunkStream {
     return e;
   }
 
-  /** 外部每帧写相机。速度用外插，不依赖渲染帧率。 */
+  /** 外部每帧写相机，速度用外插不依赖渲染帧率。 */
   setCamera(x, z, fx, fz, dtMs) {
     const dt = Math.max(1, dtMs) / 1000;
     this.cam.vx = (x - this.cam.x) / dt;
@@ -206,15 +211,15 @@ export class ChunkStream {
     return true;
   }
 
-  /** 距离：用索引解析期预存的 cx/cz，热路径零字符串切分、零临时数组。 */
+  /** 距离：用索引预存的 cx/cz，热路径零字符串切分、零临时数组。 */
   _dist(rec) {
     const dx = rec.cx - this.cam.x, dz = rec.cz - this.cam.z;
     return Math.sqrt(dx * dx + dz * dz);
   }
 
   /**
-   * 预测性预取：沿速度外推得到前视点，在 Hilbert 序上取连续一段。
-   * 连续 rank 意味着同批请求落在相邻桶/相邻磁盘区，减少 HTTP 抖动。
+   * 预测性预取：沿速度外推前视点，在 Hilbert 序上取连续一段。
+   * 连续 rank 意味着同批请求落在相邻桶/磁盘区，减少 HTTP 抖动。
    */
   _prefetchKeys(now) {
     const lead = scaled(this.governor, 'prefetchLead');
@@ -223,12 +228,9 @@ export class ChunkStream {
     const radius = scaled(this.governor, 'prefetchRadiusM');
     const out = [];
     const arr = this.idx.byHilbert;
-    // 以当前所在块的 rank 为中心向两侧扩，遇到超出半径即停
-    let anchor = 0;
-    let best = Infinity;
+    let anchor = 0, best = Infinity;
     for (let i = 0; i < arr.length; i++) {
-      const rec = arr[i];
-      const d = this._dist(rec);
+      const d = this._dist(arr[i]);
       if (d < best) { best = d; anchor = i; }
     }
     const span = 48;
@@ -236,18 +238,16 @@ export class ChunkStream {
       const i = anchor + k;
       if (i < 0 || i >= arr.length) continue;
       const rec = arr[i];
-      const ddx = rec.cx - px;
-      const ddz = rec.cz - pz;
+      const ddx = rec.cx - px, ddz = rec.cz - pz;
       const pd = Math.sqrt(ddx * ddx + ddz * ddz);
       if (pd > radius) continue;
       const e = this._entry(rec);
       if (e.state === CS.RESIDENT || e.state === CS.PINNED || e.pinned) continue;
       const face = facingScore(ddx, ddz, this.cam.fx, this.cam.fz);
-      if (face < -0.35) continue;                 // 正背后的不预取
+      if (face < -0.35) continue;
       e.score = priorityOf(rec, pd, face, this.cam.speed,
-                           e.attempts, now, e.lastUsedAt) - 30;   // 预取降一档
-      e.distM = pd;
-      e.facing = face;
+                           e.attempts, now, e.lastUsedAt) - 30;
+      e.distM = pd; e.facing = face;
       out.push(e);
     }
     this.prefetched = out.length;
@@ -262,10 +262,8 @@ export class ChunkStream {
     this.frameMs = frameMs || 0;
     this.loads = 0; this.evicts = 0;
 
-    /* [2026-11-26 手机端出生即空城修复] 入场/瞬移是长距离位移：旧位置的几十个
-       分片请求还压在队列里，新位置的区块只能排队等它们一个个失败或完成，
-       实测手机滑入城区 30 秒后出生点仍是空地，看到的全是旧 prefab 白房。
-       位移超过加载半径 1/3 就判定为「位置跳变」：中止在途请求、清掉旧队列。 */
+    // 入场/瞬移是长距离位移：旧位置的请求还压队列里会让新位置排队等，
+    // 实测滑入城区 30 秒出生点仍空。位移超过半径 1/3 判为跳变，中止在途+清队列。
     const jump = Math.hypot(this.cam.x - this.prevCam.x, this.cam.z - this.prevCam.z);
     if (jump > this.tier.loadRadiusM * 0.33) {
       try { this.io.cancelAll(); } catch (e) {}
@@ -300,8 +298,7 @@ export class ChunkStream {
     for (let i = 0; i < arr.length; i++) {
       const rec = arr[i];
       const d = this._dist(rec);
-      // 粗筛：远处非驻留块直接跳过；但已驻留块必须留下走 EVICT 判断，
-      // 否则瞬移后旧块被粗筛挡在卸载逻辑之外 → 只载不卸（实测 bug）
+      // 远处非驻留块跳过；已驻留块必须留下走 EVICT 判断，否则瞬移后只载不卸。
       if (d > loadR + this.tier.hystExitM + 200 && !this.resident.has(rec.key)) continue;
       const e = this._entry(rec);
       e.distM = d;
@@ -310,7 +307,8 @@ export class ChunkStream {
       e.idleMs = e.lastUsedAt ? now - e.lastUsedAt : 0;
       const was = e.state === CS.RESIDENT || e.state === CS.PINNED;
       const dec = hystDecision(d, was, this.tier, scale);
-      if (this._lastDecision.get(rec.key) && this._lastDecision.get(rec.key) !== dec) this.hystFlips++;
+      const prev = this._lastDecision.get(rec.key);
+      if (prev && prev !== dec) this.hystFlips++;
       this._lastDecision.set(rec.key, dec);
       if (dec === 'LOAD') {
         e.score = priorityOf(rec, d, e.facing, this.cam.speed, e.attempts, now, e.lastUsedAt);
@@ -349,8 +347,8 @@ export class ChunkStream {
     const decodeBudget = scaled(this.governor, 'decodeBudgetMs');
     this.io.pump(now, decodeBudget);
 
-    // 6.5) [转视角帧率修复] 按帧预算消化构建队列：每帧最多花 mountBudgetMs
-    //      在几何挤出/合并上，其余留到后续帧。fetch/decode 仍全速并行预取。
+    // 6.5) 按帧预算消化构建队列：每帧最多 mountBudgetMs 花在几何挤出/合并，
+    //      其余留后续帧。fetch/decode 仍全速并行预取。
     this._drainMounts(now);
 
     this.ownMs = (typeof performance !== 'undefined' ? performance.now() : Date.now()) - t0;
@@ -363,7 +361,7 @@ export class ChunkStream {
              pressure: +budgetPressure(this.budget).toFixed(3) };
   }
 
-  /** [转视角帧率修复] 每帧按时间预算消化构建队列。 */
+  /** 每帧按时间预算消化构建队列。 */
   _drainMounts(now) {
     if (!this.pendingMounts.length) return;
     const mb = Math.max(4, scaled(this.governor, 'uploadBudgetMs') || this.mountBudgetMs);
@@ -389,8 +387,8 @@ export class ChunkStream {
     e.triangles = built.triangles || 0;
     e.textureMB = built.textureMB || 0;
     e.geometryMB = built.geometryMB || 0;
-    // [2026-11-27] textureMB = 全局去重表当前值(非累加): 贴图跨 chunk 共享,
-    // 累加会重复记账; chunk 卸载也不释放共享贴图, 驱逐端同步不扣此维度。
+    // textureMB = 全局去重表当前值(非累加)。跨 chunk 共享贴图累加会重复记账，
+    // chunk 卸载也不释放共享贴图，驱逐端同步不扣此维度。
     this.budget.textureMB = +(((globalThis.__texMemTotal || 0) / 1048576)).toFixed(2);
     budgetAdd(this.budget, { chunks: 1, buildings: e.buildings,
       triangles: e.triangles, textureMB: 0, geometryMB: e.geometryMB });
@@ -414,14 +412,22 @@ export class ChunkStream {
       (rows, bucket, cached) => {
         self._move(e, CS.FETCHING, now);
         self._move(e, CS.DECODING, now);
-        // [转视角帧率修复] 不再同步构建：入队等本帧预算消化
+        // 不立即同步构建：入队等本帧预算消化
         self.pendingMounts.push({ e, rows, bucket, cached, now });
       },
       (err, attempt) => {
         e.attempts = attempt || (e.attempts + 1);
-        self._move(e, CS.FAILED, now);
-        self._move(e, CS.UNLOADED, now);
-        self.onError && self.onError(e.key + ': ' + err);
+        // 取消/中止时块可能还在 QUEUED：QUEUED 只能回 UNLOADED，
+        // 直接 FAILED 是非法跃迁（会刷 illegal_transition 日志）。
+        if (e.state === CS.QUEUED) {
+          self._move(e, CS.UNLOADED, now);
+        } else {
+          // 请求中止(aborted)属正常竞争，不记 error；真失败才记。
+          const aborted = /abort/i.test(String(err));
+          if (!aborted) self._move(e, CS.FAILED, now);
+          self._move(e, CS.UNLOADED, now);
+          if (!aborted) self.onError && self.onError(e.key + ': ' + err);
+        }
       });
     if (!ok) self._move(e, CS.UNLOADED, now);
     return ok;
@@ -437,7 +443,7 @@ export class ChunkStream {
     }
     budgetAdd(this.budget, { chunks: -d.chunks, buildings: -d.buildings,
       triangles: -d.triangles, textureMB: 0, geometryMB: -d.geometryMB });
-    // textureMB 维度由全局贴图表刷新(见 _mountNow), 驱逐共享贴图不释放故不扣
+    // textureMB 由全局贴图表刷新，驱逐共享贴图不释放故不扣。
     this.budget.evictions++;
     this.io.evictBucket(e.bucketId, false);
     this._move(e, CS.UNLOADED, now);
@@ -450,7 +456,7 @@ export class ChunkStream {
   pause() { this.paused = true; }
   resume() { this.paused = false; }
   setEnabled(v) { this.enabled = !!v; if (!v) this.io.cancelAll(); }
-  dispose() { this.io.cancelAll(); this.resident.clear(); this.entries.clear(); this.enabled = false; }
+  dispose() { this.io.cancelAll(); this.pendingMounts.length = 0; this.resident.clear(); this.entries.clear(); this.enabled = false; }
 
   /** 验收与 HUD 用的全量状态快照（只读、可 JSON 化）。 */
   state() {
@@ -496,10 +502,8 @@ export class ChunkStream {
 
 /* ============================================================
  * 4. 挂载钩子：与 miami_layer 的真实 chunked 层对接
- * ============================================================
- * 关键：绝不在缺数据时造城市。manifest 拿不到 / 不是 chunked /
- * 索引复算失败 → 返回 null，零请求、零几何、零报错。
- */
+ * 缺数据绝不造城市：manifest 拿不到/非 chunked/索引失败 → null。
+ * ============================================================ */
 export async function createChunkStream(opts) {
   const mfUrl = (opts.base || './data/') + 'urban_manifest.json';
   let mf = null;

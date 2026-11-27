@@ -2,6 +2,11 @@
 // 全部来自全量导出（地块 596,654 / 分区 49,429 / 水体 12,149 /
 // 道路 116,464 / 运河 1,357 / 路口 368,288 / 许可 238,089 / 高程 958×1077）
 // 按块加载、离场释放，每块合并为一次 draw。
+//
+// 逐字重写版要点：
+//   - 地面必须是真实铺石贴图而非纯色板（纯色灰板＝"几百MB不如程序生成"的观感根因）
+//   - 全域 roadbed 用浅色铺石(PavingStones070 均值~140)，黑沥青只属于道路面
+//   - 世界尺度 UV：地块按 XZ 每 24m 一周期，roadbed 按米数 repeat
 import * as THREE from 'three';
 
 const Y_GROUND = 0.05, Y_LINE = 0.08, Y_POINT = 0.12;
@@ -22,6 +27,7 @@ function segsFromPolyline(pts, y, out) {
   }
 }
 
+// 通用图层基类：按块 fetch、合并几何、按距离装载/卸载。
 class Layer {
   constructor(scene, manifest, color, opts = {}) {
     this.scene = scene; this.manifest = manifest;
@@ -104,31 +110,27 @@ class Layer {
   }
 }
 
-/* [实体地面] 原实现把地块/水体只画成轮廓线 → 玩家脚下没有面，远看一层蓝膜。
-   现在把真实地块三角化填成实体地面：地块之间的空隙＝真实街道网络，
-   水体填深蓝＝比斯坎湾真正显形。规划分区线单独一层，默认关闭。 */
+/* 实体地面：真实地块三角化填面，地块之间的空隙＝真实街道网络。 */
 class GroundLayer extends Layer {
   constructor(scene, manifest, color, opts = {}) {
     super(scene, manifest, color, opts);
     this.radius = opts.radius || 1250;
     this.maxChunks = opts.maxChunks || 18;
-    // [2026-11-27 地面显形] 264MB 真实地块数据此前被画成纯色块 MeshBasicMaterial(0x6f6d66),
-    // 玩家脚下/远看都是一块灰板 —— 这正是"几百MB不如程序生成"的根因。换成实拍铺石贴图。
+    // 实拍铺石贴图替代纯色灰板。
     const TL = new THREE.TextureLoader();
     const texPave = TL.load('./textures/real/acg_PavingStones070_Color.webp');
     texPave.wrapS = texPave.wrapT = THREE.RepeatWrapping;
     texPave.colorSpace = THREE.SRGBColorSpace;
     texPave.anisotropy = 4;
     this.matParcel = new THREE.MeshStandardMaterial({ map: texPave, roughness: 0.95, metalness: 0, side: THREE.DoubleSide });
-    this.matWater  = new THREE.MeshStandardMaterial({ color: 0x2f6d8a, roughness: 0.18, metalness: 0.1, side: THREE.DoubleSide, transparent: false });
-    this.matZone   = new THREE.LineBasicMaterial({ color: 0x74b6ff, transparent: true, opacity: 0.34, depthWrite: false });
+    this.matWater = new THREE.MeshStandardMaterial({ color: 0x2f6d8a, roughness: 0.18, metalness: 0.1, side: THREE.DoubleSide, transparent: false });
+    this.matZone = new THREE.LineBasicMaterial({ color: 0x74b6ff, transparent: true, opacity: 0.34, depthWrite: false });
     this.planVisible = false;
     this.zMeshes = new Map();
     this.stats = { parcels: 0, water: 0, zoning: 0, loaded: 0, errors: 0 };
   }
 
-  /* rings → 三角面（只收 3~96 点的地块，绝大多数是 4~12 点的矩形/多边形） */
-  /* items = [{rings:[{pts:[[x,z],...]}]}]；每个 item 可能有多个环（洞），逐环三角化。 */
+  /* rings → 三角面（3~96 点的地块，绝大多数 4~12 点矩形/多边形）。 */
   _fill(items, y, pos, idx, maxPts = 2400) {
     let n = 0;
     for (const it of items || []) {
@@ -156,8 +158,7 @@ class GroundLayer extends Layer {
     const nor = new Float32Array(pos.length);
     for (let i = 0; i < nor.length; i += 3) nor[i + 1] = 1;
     geo.setAttribute('normal', new THREE.BufferAttribute(nor, 3));
-    // [2026-11-27 地面显形] 真实地块多边形此前无 uv → 贴图无法平铺。按世界 XZ 生成 uv,
-    // 每 24m 一个贴图周期(与立面 48m 尺度一致的一半,地面颗粒更细)。
+    // 世界 XZ 生成 uv，每 24m 一个贴图周期。
     const uv = new Float32Array((pos.length / 3) * 2);
     for (let i = 0, j = 0; i < pos.length; i += 3, j += 2) {
       uv[j] = pos[i] / 24; uv[j + 1] = pos[i + 2] / 24;
@@ -185,9 +186,7 @@ class GroundLayer extends Layer {
 
       const pp = [], pi = [], wp = [], wi = [];
       this.stats.parcels += this._fill(pack.parcel, Y_GROUND, pp, pi);
-      /* 水体整块覆盖（每块 20+ 个 1km 级面），会把底板与街道全部糊成青色水面。
-         关闭填充：海/湾交给地平线色，陆地由基底路面与地块承担。 */
-      // this.stats.water += ... (已停用)
+      // 水体整块覆盖会把底板与街道糊成青色，关闭填充；海/湾交给地平线色。
 
       const mp = this._mesh(pp, pi, this.matParcel);
       const mw = this._mesh(wp, wi, this.matWater);
@@ -195,7 +194,6 @@ class GroundLayer extends Layer {
       if (mw) { mw.renderOrder = 2; g.add(mw); }
       if (mp || mw) this.meshes.set(key, mp || mw);
 
-      // 分区线（默认隐藏，一次开关全城切换）
       const zp = [], zi = [];
       for (const z of pack.zoning || []) segsFromRings(z.rings, Y_GROUND + 0.06, zp);
       this.stats.zoning += (pack.zoning || []).length;
@@ -315,12 +313,8 @@ class PointLayer {
   }
 }
 
-
 /* ---------------------------------------------------------------- 沥青路面层
-   全量 116,464 条真实道路中心线（urban_lines）→ 条带网格。
-   旧版只有 1px 的 LineBasicMaterial 灰线，实机上等于没有街道；这里把每条
-   中心线扩成半宽 5.5m 的双向车道面，一次合批一个 draw。
-   宽度是渲染参数（数据里没有路宽字段），如实标注，不冒充实测。 */
+   全量 116,464 条真实道路中心线 → 条带网格，半宽 5.5m 双向车道，合批一个 draw。 */
 const ROAD_V = `
 varying vec2 vUv;
 varying vec3 vWorld;
@@ -382,9 +376,7 @@ class RoadLayer {
       want.push([c.key, dx * dx + dz * dz]);
     }
     want.sort((a, b) => a[1] - b[1]);
-    /* [2026-11-26 网络风暴修复] 旧代码对「半径内所有块」发请求（半径 1.4km 有
-       150+ 块，每块一个 JSON），线上实测 errors 3 万+、请求互相挤占带宽，
-       真正要看的近处道路反而排不上。只装最近 maxChunks 块。 */
+    // 只装最近 maxChunks 块，避免网络风暴（半径 1.4km 有 150+ 块）。
     this.failed = this.failed || new Set();
     for (let i = 0; i < Math.min(this.maxChunks, want.length); i++) {
       const k = want[i][0];
@@ -475,23 +467,17 @@ export class UrbanFull {
       g('urban_ground_manifest.json'), g('urban_lines_manifest.json'), g('urban_points_manifest.json')]);
     if (gm) this.layers.push(new GroundLayer(this.scene, gm, 0x8a8779, { base: this.base, radius: Math.min(this.radius, 1400), maxChunks: 18 }));
     if (lm) {
-      // 真实街道沥青面（116,464 条中心线）：替代只有 1px 的灰线层
       this.roadLayer = new RoadLayer(this.scene, lm, { base: this.base, radius: Math.min(this.radius, 1400), maxChunks: 40 });
       this.layers.push(this.roadLayer);
     }
     if (pm) this.layers.push(new PointLayer(this.scene, pm, { base: this.base, radius: this.radius * 1.4, maxChunks: 15 }));
-    /* [基底路面] 真实地块多边形只覆盖建筑占地，地块之间的街道是空的，
-       城市看起来像"浮在水上的建筑群"。补一张覆盖全域的沥青底板。 */
+    // 全域基底路面：真实地块多边形只覆盖建筑占地，地块之间街道为空。
     try {
-      /* 全域包围盒（来自全量建筑清单实测）：cx -56.7~19.7 km，cz -4.7~78.1 km */
+      // 全域包围盒（来自全量建筑清单实测）：cx -56.7~19.7km，cz -4.7~78.1km
       const x0 = -56700, x1 = 19700, z0 = -4700, z1 = 78100, pad = 4000;
       const geo = new THREE.PlaneGeometry((x1 - x0) + pad * 2, (z1 - z0) + pad * 2, 96, 96);
       geo.rotateX(-Math.PI / 2);
-      // [2026-11-27 地面显形] 全域纯色底板 0x7c7a72 就是"紫色地面"元凶。换真实沥青贴图,
-      // 世界尺度平铺 uv(plane 的 uv 是 0..1,按米数换算 repeat),让 8 万米路面有真实颗粒。
-      // [2026-11-27 黑地修复] 沥青贴图均值 RGB(43,43,40)，铺整城 roadbed 让地面一片黑。
-      // 真实城市基底是浅灰人行道/街区铺装，沥青只属于道路面（nova_urban 街面 shader
-      // 会在 roadbed 之上画道路）。基底换 PavingStones070(均值140,138,130)。
+      // 浅色铺石 PavingStones070 作基底（黑沥青只属于道路面）。
       const TL2 = new THREE.TextureLoader();
       const texAsphalt = TL2.load('./textures/real/acg_PavingStones070_Color.webp');
       texAsphalt.wrapS = texAsphalt.wrapT = THREE.RepeatWrapping;
@@ -499,10 +485,10 @@ export class UrbanFull {
       texAsphalt.repeat.set(((x1 - x0) + pad * 2) / 24, ((z1 - z0) + pad * 2) / 24);
       texAsphalt.anisotropy = 4;
       const mesh = new THREE.Mesh(geo, new THREE.MeshStandardMaterial({ map: texAsphalt, roughness: 0.92, metalness: 0, side: THREE.DoubleSide }));
-      mesh.position.set((x0 + x1) / 2, 0.02, (z0 + z1) / 2);   // 高于水体(-0.02)：陆地路面优先，海面后续用掩码单独铺
+      mesh.position.set((x0 + x1) / 2, 0.02, (z0 + z1) / 2);
       mesh.name = 'urban:roadbed';
       mesh.renderOrder = -1;
-      mesh.frustumCulled = false;   // 8 万米见方的单块几何，包围球误判会被整块剔除
+      mesh.frustumCulled = false;
       this.scene.add(mesh);
       this.roadbed = mesh;
     } catch (e) { /* 基底失败不阻断主流程 */ }
@@ -551,6 +537,6 @@ export async function mountUrbanFull(scene, camera, opts = {}) {
   const u = new UrbanFull(scene, camera, opts);
   const st = await u.init();
   console.log('[urbanFull]', st);
-  window.__setPlanLines = (on) => u.setPlanVisible(on);   // 规划图层一键开关
+  window.__setPlanLines = (on) => u.setPlanVisible(on);
   return u;
 }
