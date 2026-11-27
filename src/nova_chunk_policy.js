@@ -67,7 +67,10 @@ export const TIERS = Object.freeze({
     residentChunks: 320,
     residentBuildings: 90000,
     residentTriangles: 4200000,
-    textureBudgetMB: 288,
+    // [2026-11-27 显存修复] 贴图全局去重稳态实测336MB,cap 必须高于满载贴图总量,
+    // 否则 textureMB 维度恒>0.92 触发驱逐,但贴图不随块卸载释放→pressure压不下来→每帧空转。
+    // 480MB 留~43%余量;贴图显存仍记账上报,只是不再当驱逐触发器。
+    textureBudgetMB: 480,
     geometryBudgetMB: 96,
     loadRadiusM: 1050,
     keepRadiusM: 1420,
@@ -101,7 +104,8 @@ export const TIERS = Object.freeze({
     residentChunks: 260,
     residentBuildings: 68000,
     residentTriangles: 3000000,
-    textureBudgetMB: 160,
+    // [2026-11-27 显存修复] 同 drift: 稳态贴图336MB,cap 抬到480避免驱逐空转抖动。
+    textureBudgetMB: 480,
     geometryBudgetMB: 92,
     loadRadiusM: 1300,
     keepRadiusM: 1700,
@@ -128,7 +132,8 @@ export const TIERS = Object.freeze({
     residentChunks: 96,
     residentBuildings: 18000,
     residentTriangles: 720000,
-    textureBudgetMB: 80,
+    // [2026-11-27 显存修复] ember 最低档同样抬到480,防止贴图维度误触驱逐空转。
+    textureBudgetMB: 480,
     geometryBudgetMB: 26,
     loadRadiusM: 560,
     keepRadiusM: 780,

@@ -17,6 +17,8 @@ GZIP_EXTS = ('.json', '.js', '.html', '.css', '.txt')
 class H(SimpleHTTPRequestHandler):
     protocol_version = 'HTTP/1.1'
     def end_headers(self):
+        # [bug修复] HTTP/1.1 keep-alive 下同一 handler 实例服务多个请求，
+        # 必须把压缩标志当"每请求"状态：在 send_head 开头重置，仅本请求压缩时为 True。
         if getattr(self, '_gzip_on', False):
             self.send_header('Content-Encoding', 'gzip')
             self.send_header('Vary', 'Accept-Encoding')
@@ -25,6 +27,10 @@ class H(SimpleHTTPRequestHandler):
         self.send_header('Access-Control-Allow-Origin', '*')
         super().end_headers()
     def send_head(self):
+        # 每请求重置压缩标志（keep-alive 复用实例的致命 bug：上个请求的
+        # gzip 标志会让后续二进制请求带 Content-Encoding:gzip 却发原始字节
+        # → ERR_CONTENT_DECODING_FAILED → 贴图/模型随机加载失败）
+        self._gzip_on = False
         path = self.translate_path(self.path.split('?')[0])
         if os.path.isdir(path):
             return super().send_head()

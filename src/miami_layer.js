@@ -304,10 +304,23 @@ export class ChunkedUrbanLayer {
        迈阿密组合：玻璃塔 Facade001/005/006 + 砖石公寓 Facade018A/020A + Deco 白灰泥。
        normal/roughness/AO 走原生 JPG（webp 在软渲染后端会死黑，已验证两次）。 */
     const TL = new THREE.TextureLoader();
+    // [2026-11-27 显存记账] 全局贴图显存表：uuid -> 字节。跨 chunk 去重，
+    // chunk 级计数会把共享贴图重复计几十次(实测 11.6GB 假账)。
+    if (!globalThis.__texMemMap) { globalThis.__texMemMap = new Map(); globalThis.__texMemTotal = 0; }
     const tex = (f, srgb) => {
       // [缓存修复] 贴图内容变了但同名，服务端 max-age 86400 会让手机一直拿旧图。
       // 加版本号强制刷新；以后改图只改这个常量。
-      const t = TL.load('./textures/real/' + f + '?v=20261126f');
+      const t = TL.load('./textures/real/' + f + '?v=20261126f', loaded => {
+        try {
+          const img = loaded && loaded.image;
+          const w = img && (img.width || img.videoWidth), h = img && (img.height || img.videoHeight);
+          if (w && h && !globalThis.__texMemMap.has(loaded.uuid)) {
+            const bytes = w * h * 4;
+            globalThis.__texMemMap.set(loaded.uuid, bytes);
+            globalThis.__texMemTotal += bytes;
+          }
+        } catch (e) { /* 记账失败不影响渲染 */ }
+      });
       t.wrapS = t.wrapT = THREE.RepeatWrapping;
       t.anisotropy = 8;
       if (srgb) t.colorSpace = THREE.SRGBColorSpace;
@@ -593,9 +606,12 @@ export class ChunkedUrbanLayer {
         // 每块装配都失败 → 流送调度器判定挂载失败、永不推进 → 出生点整片无楼。
         // 统计量改从 userData 读（_buildChunkMesh 已写好 triangles/verts）。
         const ud = mesh.userData || {};
+        // [2026-11-27 显存修复] 预算 textureMB 直接取全局去重表真实值
+        // (贴图加载回调已登记, 见上方 tex())。chunk 级统计会把共享贴图重复计几十次。
+        const textureMB = +((globalThis.__texMemTotal || 0) / 1048576).toFixed(2);
         return {
           object: mesh, buildings: ud.buildings || rows.length,
-          triangles: ud.triangles || 0,
+          triangles: ud.triangles || 0, textureMB,
           geometryMB: +(((ud.verts || 0) * 4 * 11) / 1048576).toFixed(4),
         };
       },

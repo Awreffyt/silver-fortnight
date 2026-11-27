@@ -389,8 +389,11 @@ export class ChunkStream {
     e.triangles = built.triangles || 0;
     e.textureMB = built.textureMB || 0;
     e.geometryMB = built.geometryMB || 0;
+    // [2026-11-27] textureMB = 全局去重表当前值(非累加): 贴图跨 chunk 共享,
+    // 累加会重复记账; chunk 卸载也不释放共享贴图, 驱逐端同步不扣此维度。
+    this.budget.textureMB = +(((globalThis.__texMemTotal || 0) / 1048576)).toFixed(2);
     budgetAdd(this.budget, { chunks: 1, buildings: e.buildings,
-      triangles: e.triangles, textureMB: e.textureMB, geometryMB: e.geometryMB });
+      triangles: e.triangles, textureMB: 0, geometryMB: e.geometryMB });
     e.visible = true;
     this._move(e, CS.RESIDENT, now);
     this.failed.delete(e.key);
@@ -433,7 +436,8 @@ export class ChunkStream {
       this.onError && this.onError('unmount ' + e.key + ' ' + String(err).slice(0, 120));
     }
     budgetAdd(this.budget, { chunks: -d.chunks, buildings: -d.buildings,
-      triangles: -d.triangles, textureMB: -d.textureMB, geometryMB: -d.geometryMB });
+      triangles: -d.triangles, textureMB: 0, geometryMB: -d.geometryMB });
+    // textureMB 维度由全局贴图表刷新(见 _mountNow), 驱逐共享贴图不释放故不扣
     this.budget.evictions++;
     this.io.evictBucket(e.bucketId, false);
     this._move(e, CS.UNLOADED, now);
