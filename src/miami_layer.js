@@ -14,12 +14,60 @@
 // 得到 (X_t, H, Z_t)——det=+1，绕序/法线/贴图手性保持。
 import * as THREE from 'three';
 import { mergeGeometries } from 'three/addons/utils/BufferGeometryUtils.js';
-import { ChunkStream } from './nova_chunk_core.js?v=a7u2601';
+import { ChunkStream } from './nova_chunk_core.js?v=a7div2';
 
 export const URBAN_DATA_URL = './data/miami_urban.json';
 export const CHUNK_SIZE = 200;
 
 const UV_SCALE = 0.25;   // 每 4 m 一个纹理周期（未走盒投影的兜底几何用）
+
+// ---------------------------------------------------------------------------
+// 屋顶形态变体：迈阿密天际线千奇百怪，实楼有设备层/退台/顶塔/平顶之分。
+// 用稳定 seed 让同高楼也有不同屋顶轮廓，打破"全城平顶方盒子"。
+// 所有附加体统一转非索引（ExtrudeGeometry 非索引），保证 mergeGeometries 成功；
+// 侧面由 reprojectUV 世界盒投影自动贴立面窗格，顶面采屋顶带，法线天然朝外。
+// ---------------------------------------------------------------------------
+function addRoofForm(geo, building) {
+  const sd = seedOf(building.id, 'form');
+  const v = sd % 10;
+  if (v < 3) return geo;                       // 30% 保留平顶（真实存在）
+  const bb = geo.boundingBox;
+  if (!bb) return geo;
+  const w = bb.max.x - bb.min.x, d = bb.max.z - bb.min.z;
+  const H = building.heightM;
+  if (w < 3 || d < 3 || H < 9) return geo;     // 过小/过矮的楼不加，避免噪点
+  const cx = (bb.min.x + bb.max.x) / 2, cz = (bb.min.z + bb.max.z) / 2;
+  const baseY = building.baseY || 0;
+  const topY = baseY + H;
+  const box = (sx, sy, sz, cy, ox, oz) => {
+    const g = new THREE.BoxGeometry(sx, sy, sz).toNonIndexed();
+    g.translate(cx + (ox || 0), cy, cz + (oz || 0));
+    return g;
+  };
+  const adds = [];
+  if (v < 6) {
+    // 屋顶设备/楼梯间：占 40~55% 宽，高 2.2~4.2m
+    const s = 0.40 + (sd % 4) * 0.05, hh = 2.2 + (sd % 5) * 0.5;
+    adds.push(box(w * s, hh, d * s, topY + hh / 2, 0, 0));
+  } else if (v < 8) {
+    // 顶部退台塔：占 60% 宽，高 12~18% 楼高（封顶 9m）
+    const hh = Math.min(H * (0.12 + (sd % 3) * 0.03), 9);
+    adds.push(box(w * 0.60, hh, d * 0.60, topY + hh / 2, 0, 0));
+  } else {
+    // 双塔设备层：一高一低，工业感屋顶
+    const hh = 2.0 + (sd % 3) * 0.5;
+    adds.push(box(w * 0.26, hh, d * 0.30, topY + hh / 2, -w * 0.22, 0));
+    adds.push(box(w * 0.26, hh * 0.8, d * 0.30, topY + hh * 0.4, w * 0.22, 0));
+  }
+  if (!adds.length) return geo;
+  const all = [geo].concat(adds);
+  const merged = mergeGeometries(all, false);
+  all.forEach(g => { if (g !== merged) g.dispose(); });
+  if (!merged) return geo;
+  merged.computeBoundingBox();
+  merged.computeBoundingSphere();
+  return merged;
+}
 
 // ---------------------------------------------------------------------------
 // 单栋建筑 → BufferGeometry
@@ -52,8 +100,13 @@ export function buildUrbanGeometry(building) {
   if (uv) for (let i = 0; i < uv.count; i++) uv.setXY(i, uv.getX(i) * UV_SCALE, uv.getY(i) * UV_SCALE);
   geo.computeVertexNormals();
   geo.computeBoundingBox();
-  geo.computeBoundingSphere();
-  return geo;
+  // [多样性] 叠加屋顶形态变体（设备层/退台/双塔/平顶），打破千篇一律的方盒子。
+  // 必须在 reprojectUV 之前合并：新几何体随后一起走世界盒投影 + 色扰。
+  const shaped = addRoofForm(geo, building);
+  shaped.computeVertexNormals();
+  shaped.computeBoundingBox();
+  shaped.computeBoundingSphere();
+  return shaped;
 }
 
 // 稳定伪随机：同一 (id,key) 每次得到同样的分档 / 色扰 / UV 偏移。
@@ -120,11 +173,12 @@ function reprojectUV(geo, period = 48, seed = 0) {
     for (let i = 0; i < uv.count; i++) { a[i * 2] = uv.getX(i); a[i * 2 + 1] = uv.getY(i); }
     geo.setAttribute('uv1', new THREE.BufferAttribute(a, 2));
   }
-  // 逐栋色扰：同材质下避免复制粘贴感（明度 0.86~1.12 / 冷暖 ±2.5%）。
+  // 逐栋色扰：迈阿密街区真实楼色各异（奶白/暖黄/灰蓝），同贴图相邻楼也必须分辨。
+  // 明度 0.80~1.18 / 冷暖 ±10%：比旧版 ±7% 明显，但不至于艳俗。
   const n = pos.count;
   const col = new Float32Array(n * 3);
-  const lum = 0.86 + ((seed * 0.7548776662) % 1) * 0.26;
-  const warm = 1 + (((seed * 0.3183098862) % 1) - 0.5) * 0.05;
+  const lum = 0.80 + ((seed * 0.7548776662) % 1) * 0.38;
+  const warm = 1 + (((seed * 0.3183098862) % 1) - 0.5) * 0.20;
   for (let i = 0; i < n; i++) {
     col[i * 3] = lum * warm;
     col[i * 3 + 1] = lum;
@@ -315,7 +369,7 @@ export class ChunkedUrbanLayer {
     const tex = (f, srgb) => {
       // 贴图内容变了但同名时,服务端 max-age 会让手机一直拿旧图；
       // 改图只改这个版本号常量即可强制刷新。
-      const t = TL.load('./textures/real/' + f + '?v=20261127sharp', loaded => {
+      const t = TL.load('./textures/real/' + f + '?v=20261127div4', loaded => {
         try {
           const img = loaded && loaded.image;
           const w = img && (img.width || img.videoWidth), h = img && (img.height || img.videoHeight);
@@ -335,9 +389,11 @@ export class ChunkedUrbanLayer {
     // 桌面端保留原生法线 + GPU POM 视差。
     const MOBILE_RT = !!(globalThis.__mcPerf && globalThis.__mcPerf.isMobileUA);
     const BAKED = ['Facade001', 'Facade005', 'Facade006'];
-    const mkMat = (name, rough = 0.84, metal = 0.0) => {
+    // [多样性] colorName 可与 PBR 通道名不同：新迈阿密外观只换 Color 贴图，
+    // 法线/粗糙度/AO 复用同结构建筑的真实摄影测量通道，窗洞凹凸立体感不变。
+    const mkMat = (name, rough = 0.84, metal = 0.0, colorName = name) => {
       const m = new THREE.MeshStandardMaterial({
-        map: tex('acg_' + name + '_Color.jpg', true),
+        map: tex('acg_' + colorName + '_Color.jpg', true),
         normalMap: tex('acg_' + name + (MOBILE_RT && BAKED.includes(name) ? '_BakedN' : '_NormalGL') + '.jpg', false),
         normalScale: MOBILE_RT ? new THREE.Vector2(0.85, 0.85) : new THREE.Vector2(0.45, 0.45),
         roughnessMap: tex('acg_' + name + '_Roughness.jpg', false),
@@ -394,7 +450,9 @@ export class ChunkedUrbanLayer {
               sampledDiffuseColor = sRGBTransferEOTF(sampledDiffuseColor);
             #endif
             diffuseColor *= sampledDiffuseColor;
-            diffuseColor.rgb = clamp(pow(diffuseColor.rgb, vec3(0.96)) * vec3(1.02,1.0,0.97), 0.0, 1.0);
+            // [多样性] 旧的 pow(0.96) 提亮暗部、压缩逐栋色扰对比，导致全城偏白；
+            // 改为 1.0 保留真实反照率差异，让奶白/暖黄/灰蓝楼色分明。
+            diffuseColor.rgb = clamp(pow(diffuseColor.rgb, vec3(1.0)) * vec3(1.0,1.0,0.99), 0.0, 1.0);
             #endif
             `);
         m.userData.pomShader = sh;
@@ -411,10 +469,39 @@ export class ChunkedUrbanLayer {
     this.matGlass = this.matStucco === opts.material ? this.matStucco : mkMat('Facade001', 0.30, 0.0);
     this.matGlassB = this.matStucco === opts.material ? this.matStucco : mkMat('Facade005', 0.34, 0.0);
     this.matGlassC = this.matStucco === opts.material ? this.matStucco : mkMat('Facade006', 0.38, 0.0);
+    // [多样性] 4 张新增迈阿密外观：薄荷绿Deco/奶白Deco/蓝绿玻璃/高层阳台。
+    // 只换 Color，法线/粗糙度/AO 复用结构相近的原材质（窗洞立体感保留）。
+    const mkVariant = (pbrName, colorName, rough, metal = 0.0) =>
+      this.matStucco === opts.material ? this.matStucco : mkMat(pbrName, rough, metal, colorName);
+    this.matDecoMint  = mkVariant('Facade018A', 'MiamiDecoMint', 0.86);
+    this.matDecoCream = mkVariant('PaintedPlaster006', 'MiamiDecoCream', 0.94);
+    this.matGlassGreen= mkVariant('Facade001', 'MiamiGlassGreen', 0.30);
+    this.matHighBal   = mkVariant('Facade020A', 'MiamiHighBalcony', 0.82);
+    // [多样性] 3 种染色变体：保真实窗格阳台结构，只换楼色（迈阿密常见的薄荷绿/珊瑚粉/灰蓝）。
+    this.matTintMint  = mkVariant('Facade020A', 'MiamiTintMint', 0.82);
+    this.matTintCoral = mkVariant('Facade020A', 'MiamiTintCoral', 0.82);
+    this.matTintBlue  = mkVariant('Facade020A', 'MiamiTintBlue', 0.82);
     // 照片贴图已含真实反照率，只做极轻微暖偏，不再整体放大（避免白塔过曝）。
-    for (const m of [this.matStucco, this.matMixed, this.matConcrete, this.matGlass, this.matGlassB, this.matGlassC]) {
+    this.allMats = [this.matStucco, this.matMixed, this.matConcrete, this.matGlass,
+                    this.matGlassB, this.matGlassC, this.matDecoMint, this.matDecoCream,
+                    this.matGlassGreen, this.matHighBal,
+                    this.matTintMint, this.matTintCoral, this.matTintBlue];
+    for (const m of this.allMats) {
       if (m && m.color && m !== opts.material) m.color.setRGB(1.04, 1.0, 0.95);
     }
+    // 每档的候选材质：同档内按 seed 稳定选一个，相邻楼大概率不同外观。
+    // band0 灰泥 / band1 低层 / band2 中层 / band3-5 玻璃塔
+    // [多样性 v2] ArtDeco 特写贴图(Mint/Cream)是透视特写、非可平铺立面——
+    // 贴到整栋宽楼会变成一整块浮雕巨墙，不像楼。故只留给 band0 极小附属物；
+    // 低层/中层只用真正可平铺、带规则窗格的立面（红砖框窗/阳台/混凝土/玻璃）。
+    this.bandVariants = [
+      [this.matStucco],                                       // 0: <8m 灰泥附属物（特写图贴小楼也怪，纯灰泥即可）
+      [this.matMixed, this.matHighBal, this.matTintMint, this.matTintCoral, this.matTintBlue], // 1: 8-20m 低层(红砖/阳台/薄荷绿/珊瑚粉/灰蓝)
+      [this.matConcrete, this.matHighBal, this.matTintMint, this.matTintCoral, this.matTintBlue], // 2: 20-60m 中层
+      [this.matGlass, this.matGlassGreen, this.matGlassB],    // 3: >60m 玻璃塔A
+      [this.matGlassB, this.matGlassGreen, this.matGlassC],   // 4: 玻璃塔B
+      [this.matGlassC, this.matGlass, this.matGlassGreen],    // 5: 玻璃塔C
+    ];
     this.material = this.matStucco;
     for (const c of manifest.chunks || []) this.byKey.set(c.key, c);
   }
@@ -514,7 +601,12 @@ export class ChunkedUrbanLayer {
     if (!Array.isArray(rows) || !rows.length) return null;
     const c = this.byKey.get(key);
     if (!c) return null;
-    const buckets = [[], [], [], [], [], []];
+    // [多样性] 桶按"实际用到的材质"动态建立，不再固定 6 档。
+    // 每栋楼 bandOf 定结构档，(seed>>3) 在同档候选里选一种外观，
+    // 合并后 draw call = 本块用到的材质数，通常 6~10 个，手机端可控。
+    const matIndex = new Map();   // material.uuid → bucket 序号
+    const buckets = [];
+    const mats = [];
     let builtN = 0;
     for (const b of rows) {
       if (!(b.heightM > 0)) { this.skipped.noHeight++; continue; }
@@ -523,13 +615,16 @@ export class ChunkedUrbanLayer {
       const sd = seedOf(b.id, key);
       const band = bandOf(b.heightM, sd);
       reprojectUV(bg, periodOf(band), sd);
-      buckets[band].push(bg);
+      const variants = this.bandVariants[band];
+      const mat = variants[(sd >>> 3) % variants.length];
+      let bi = matIndex.get(mat.uuid);
+      if (bi === undefined) { bi = mats.length; matIndex.set(mat.uuid, bi); mats.push(mat); buckets.push([]); }
+      buckets[bi].push(bg);
       builtN++;
     }
     if (!builtN) return null;
     const g = this._ensureGroup(key);
     if (!g) { buckets.forEach(a => a.forEach(x => x.dispose())); return null; }
-    const mats = [this.matStucco, this.matMixed, this.matConcrete, this.matGlass, this.matGlassB, this.matGlassC];
     // 保留本块真实轮廓供街面着色器建距离场，避免整片街区变灰板。
     this.chunkRings = this.chunkRings || new Map();
     this.chunkRings.set(key, rows.map(b => b && b.rings).filter(Boolean));
@@ -648,7 +743,7 @@ export class ChunkedUrbanLayer {
     for (const m of this.meshByKey.values())
       m.traverse(c => { if (c.isMesh && c.geometry) c.geometry.dispose(); });
     for (const g of this.groups.values()) this.scene.remove(g);
-    for (const m of new Set([this.matStucco, this.matMixed, this.matConcrete, this.matGlass, this.matGlassB, this.matGlassC]))
+    for (const m of new Set(this.allMats || [this.matStucco, this.matMixed, this.matConcrete, this.matGlass, this.matGlassB, this.matGlassC]))
       if (m && m.dispose) m.dispose();
     this.meshByKey.clear(); this.groups.clear(); this.loaded.clear(); this.seen.clear();
   }
