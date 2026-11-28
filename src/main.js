@@ -215,7 +215,11 @@ const renderer = new THREE.WebGLRenderer({
 // [MC-SET] 像素比上限按设置走（手机 3x 屏按 1.5 渲染，GPU 负载约减半）
 renderer.setPixelRatio(Math.min(devicePixelRatio, PERF.dprCap, (() => {
   const v = parseInt(MC.maxPixelRatio, 10);
-  return Number.isFinite(v) && v > 0 ? v : 1.5;
+  // [M1 清晰度修复] 旧默认硬编码 1.5：桌面 full 档 dprCap=2、Retina 屏 DPR=2，
+  // 本该按原生 2.0 渲染，却被这个 1.5 卡住再拉伸 → 画面糊。改为默认跟随各档
+  // dprCap：desktop full=2.0（原生清晰），mobile=1.5、mobileLow=1.0（手机不变）。
+  // 用户在设置面板手动设了 maxPixelRatio 时仍以手动值为准。
+  return Number.isFinite(v) && v > 0 ? v : PERF.dprCap;
 })()));
 renderer.setSize(innerWidth, innerHeight);
 renderer.toneMapping = THREE.NoToneMapping;   // [a7t] NOVA 合成 pass 统一接管色调映射，材质层保持线性输出
