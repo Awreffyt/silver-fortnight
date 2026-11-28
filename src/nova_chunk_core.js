@@ -21,7 +21,7 @@ import {
   governorMedian, scaled, hystDecision, facingScore, priorityOf, evictScore,
   makeBudget, budgetAdd, budgetPressure, budgetHeadroom, policySelfTest, ADR,
   STREAM_VERSION,
-} from './nova_chunk_policy.js?v=a7u';
+} from './nova_chunk_policy.js?v=a7perf1';
 import {
   ChunkIO, ioSelfTest, Gate, crc32,
 } from './nova_chunk_io.js?v=a7u';

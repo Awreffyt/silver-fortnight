@@ -1130,10 +1130,14 @@ function pumpTexQueue() {
     TEX_GEN++;          // [D15] 旧代任务完成后不得再扣减新一代的计数
     LAST_TEX_DONE = now;
   }
-  // 任何情况下都至少放行 1 个：完全停掉会让整座城永远糊着（低端机永远到不了
-  // 26fps），那是比卡更糟的体验。低帧率时靠拉开发车间隔来限流。
-  const budget = f < 20 ? 1 : f < 30 ? 2 : TEX_MAX_ACTIVE;
-  if (now - LAST_TEX_START < (f < 25 ? 120 : 0)) return;
+  /* [不降画质提速] 贴图加载不许被帧率饿死。旧写法 f<20 时 budget=1 且间隔
+     120ms → 每秒约 8 张，上百张贴图要几十秒才补齐 → 城市一直加载不全、
+     贴图残缺，而缺图又让画面持续卡，形成死锁。改成：大图仍由下面的 big-gate
+     严格串行（保住内存峰值），小图一律放开并发；发车间隔只在队列很短时
+     才退避，队列积压时全速发车，尽快把城市补全。 */
+  const backlog = TEX_QUEUE.length;
+  const budget = backlog > 8 ? TEX_MAX_ACTIVE : (f < 20 ? 1 : f < 30 ? 2 : TEX_MAX_ACTIVE);
+  if (backlog <= 4 && now - LAST_TEX_START < (f < 25 ? 120 : 0)) return;
   let guard = 64, started = 0;
   while (TEX_ACTIVE < budget && TEX_QUEUE.length && guard-- > 0) {
     /* [2026-11-17a6c] 大图串行：2048² 的解码位图 16MB、1024² 4MB，

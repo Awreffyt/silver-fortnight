@@ -188,7 +188,12 @@ export function governorSample(g, ownMs, frameMs, now) {
   g.samples++;
   g.history[g.historyAt] = ownMs;
   g.historyAt = (g.historyAt + 1) & 63;
-  const over = ownMs > g.tier.frameBudgetMs * g.scale || frameMs > g.tier.temperatureDropAtMs;
+  /* [不降画质提速] 过载判定只信本层真实耗时 ownMs。旧版还把整帧 frameMs
+     (temperatureDropAtMs=20) 当过载信号：转视角/加载期整帧必超 20ms，哪怕
+     流送层 ownMs 只有零点几毫秒也被连坐降档 → scale 砍到 0.45 → 加载半径
+     1300→585m、并发砍半 → 城市加载不全 + 贴图排队 + 越砍越卡。渲染卡顿
+     该由渲染层自己管，不许误伤流送层。frameMs 仅保留作遥测。 */
+  const over = ownMs > g.tier.frameBudgetMs * g.scale;
   if (over) { g.hotFrames++; g.coldFrames = 0; }
   else      { g.coldFrames++; g.hotFrames = 0; }
   if (now - g.lastAdjustAt < g.cooldownMs) return g.scale;
