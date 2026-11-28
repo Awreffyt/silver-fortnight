@@ -11,16 +11,16 @@ import { UnrealBloomPass } from 'three/addons/postprocessing/UnrealBloomPass.js'
 import { OutputPass } from 'three/addons/postprocessing/OutputPass.js';
 // [a7t] NOVA 自研光影管线：移动端全档常开，动态分辨率守帧
 import { NovaRenderer, novaTierFor, NOVA_TIERS, ADR_STEPS, FrameGovernor } from './nova_render.js?v=a7t';
-import { tryMountUrban } from './miami_layer.js?v=a7fix28';
+import { tryMountUrban } from './miami_layer.js?v=a7look28';
 // [LCR] 光锥光追增强层（双后端：无 WebGPU 自动降级为纯光栅化，画面不变）
 import { LCRBridge } from './lcr_bridge.js?v=lcr1';
-import { mountUrbanFull } from './urban_full.js?v=a7u2601';
+import { mountUrbanFull } from './urban_full.js?v=a7look28';
 import { mountUrbanEnhancement } from './nova_urban.js?v=a7u2601';
 import { Player } from './player.js?v=a7t';
 // [a7o] 立体贴图算法 + 三级 LOD 构建。零程序生成数据，只处理已有贴图与几何。
 import { attachRelief, packReliefMap, updateReliefMap, neutralReliefMap,
          levelForTier, levelForDistance, RELIEF_LEVELS, LOD_RADII,
-         reliefStats, setReliefLevel, whitePixelTexture } from './relief_shading.js?v=a7t';
+         reliefStats, setReliefLevel, whitePixelTexture } from './relief_shading.js?v=a7look28';
 import { bakeVertexAO, extrudeFlat, buildLodTiers, lodTierStats,
          ensureUV, ensureColor, ensureReliefColors, simplifyGeometry } from './relief_geometry.js?v=a7t';
 
@@ -1867,10 +1867,10 @@ const RELIEF_JOBS = [];
 let RELIEF_JOB_ACTIVE = 0, RELIEF_TICKING = false, RELIEF_DETACH = new Map();
 
 /** 给材质同步挂上「中性打包图」，让 shader 一次编译到位；图片到位后原地改像素。 */
-function ensureRelief(name, rec, mat, baseDir) {
+function ensureRelief(name, rec, mat, baseDir, opts) {
   if (RELIEF.off || mat.userData.mcReliefAttached) return;
   const tex = neutralReliefMap(RELIEF.maxSide);
-  const detach = attachRelief(mat, tex, RELIEF.currentLevel, {});
+  const detach = attachRelief(mat, tex, RELIEF.currentLevel, opts || {});
   mat.userData.mcReliefName = name;
   mat.userData.mcReliefBase = baseDir || './textures/';
   mat.userData.mcReliefRec = rec;
@@ -3201,7 +3201,14 @@ function charMatFor(name) {
     m.roughness = THREE.MathUtils.clamp(1 - (rec.smoothness ?? 0.3), 0.4, 1);
   }
   // [a7o] 角色也走立体贴图（独立目录），键带序号避免 charMatFor 反复调用互相覆盖
-  ensureRelief('__char__' + name + '#' + (++CHAR_RELIEF_SEQ), rec, m, './chars/textures/');
+  // [角色发蓝发虚修复] 角色是白天近景，关掉 relief 的冷蓝 Fresnel 轮廓光
+  // (RIM_COLOR=0x8fb4d9 本为赛博夜景设计)，否则皮肤/衣服边缘糊一层蓝雾。
+  ensureRelief('__char__' + name + '#' + (++CHAR_RELIEF_SEQ), rec, m, './chars/textures/',
+    { rimStrength: 0.0, rimColor: 0xffffff });
+  // 角色材质不受场景蓝雾影响（近景本就不该有雾），并中和蓝色天光：
+  // 环境反射强度归零 + 轻微暖色补偿，避免整人发青发虚。
+  m.fog = false;
+  m.envMapIntensity = 0.0;
   if (rec.mode === 1) { m.alphaTest = rec.cutoff ?? 0.5; m.alphaToCoverage = true; }
   else if (rec.mode >= 2) {
     m.transparent = true;

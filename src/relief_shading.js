@@ -285,8 +285,11 @@ export function attachRelief(material, packedTex, level, opts = {}) {
     uMcAO:          { value: P.aoStrength },
     uMcAODirect:    { value: P.aoDirect },
     uMcRoughMix:    { value: P.roughMix },
-    uMcRim:         { value: P.rimStrength },
-    uMcRimColor:    { value: RIM_COLOR.clone() },
+    // [角色发蓝修复] opts 可覆盖 rim：建筑夜景保留冷蓝轮廓，
+    // 白天近景角色关掉/调暖，避免边缘糊一层蓝雾。
+    uMcRim:         { value: opts.rimStrength !== undefined ? opts.rimStrength : P.rimStrength },
+    uMcRimColor:    { value: opts.rimColor !== undefined
+      ? new THREE.Color(opts.rimColor) : RIM_COLOR.clone() },
     uMcCurv:        { value: P.curvature },
     uMcParallax:    { value: P.parallaxScale },
     uMcNormalBoost: { value: P.normalBoost },

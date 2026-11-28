@@ -478,13 +478,37 @@ export class UrbanFull {
       const geo = new THREE.PlaneGeometry((x1 - x0) + pad * 2, (z1 - z0) + pad * 2, 96, 96);
       geo.rotateX(-Math.PI / 2);
       // 浅色铺石 PavingStones070 作基底（黑沥青只属于道路面）。
+      // [地面立体感修复] 旧版只挂 Color.webp → 一整张平板贴纸，砖块无凹凸、缝隙
+      // 全靠贴图画，零立体感。现补齐 ambientCG 现成的 NormalGL + Roughness 通道；
+      // 并对 96×96 平面顶点做 cm 级起伏（低频噪声），让近景砖面有真实高低。
       const TL2 = new THREE.TextureLoader();
+      const REP = ((x1 - x0) + pad * 2) / 24;
       const texAsphalt = TL2.load('./textures/real/acg_PavingStones070_Color.webp');
       texAsphalt.wrapS = texAsphalt.wrapT = THREE.RepeatWrapping;
       texAsphalt.colorSpace = THREE.SRGBColorSpace;
-      texAsphalt.repeat.set(((x1 - x0) + pad * 2) / 24, ((z1 - z0) + pad * 2) / 24);
+      texAsphalt.repeat.set(REP, ((z1 - z0) + pad * 2) / 24);
       texAsphalt.anisotropy = 4;
-      const mesh = new THREE.Mesh(geo, new THREE.MeshStandardMaterial({ map: texAsphalt, roughness: 0.92, metalness: 0, side: THREE.DoubleSide }));
+      const texAN = TL2.load('./textures/real/acg_PavingStones070_NormalGL.webp');
+      texAN.wrapS = texAN.wrapT = THREE.RepeatWrapping;
+      texAN.repeat.copy(texAsphalt.repeat);
+      texAN.anisotropy = 4;
+      const texAR = TL2.load('./textures/real/acg_PavingStones070_Roughness.webp');
+      texAR.wrapS = texAR.wrapT = THREE.RepeatWrapping;
+      texAR.repeat.copy(texAsphalt.repeat);
+      // 顶点微起伏：毫米级正弦叠加，仅提供掠射光下的真实光影，不改可站立高度。
+      const gp = geo.getAttribute('position');
+      if (gp) for (let i = 0; i < gp.count; i++) {
+        const x = gp.getX(i), z = gp.getZ(i);
+        gp.setY(i, Math.sin(x * 0.013) * Math.cos(z * 0.011) * 0.045
+                  + Math.sin(x * 0.041 + z * 0.037) * 0.018);
+      }
+      gp.needsUpdate = true;
+      geo.computeVertexNormals();
+      const mesh = new THREE.Mesh(geo, new THREE.MeshStandardMaterial({
+        map: texAsphalt, normalMap: texAN, roughnessMap: texAR,
+        normalScale: new THREE.Vector2(0.8, 0.8),
+        roughness: 0.92, metalness: 0, side: THREE.DoubleSide,
+      }));
       mesh.position.set((x0 + x1) / 2, 0.02, (z0 + z1) / 2);
       mesh.name = 'urban:roadbed';
       mesh.renderOrder = -1;
