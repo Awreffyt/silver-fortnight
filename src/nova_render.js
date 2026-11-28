@@ -28,9 +28,12 @@ export const NOVA_TIERS = {
   0: { name: 'halo',   renderScale: 1.00, bloomScale: 0.25, blurIter: 3,
        fxaa: true, ao: true, autoExposure: true, depthFx: true, extraSamples: 12,
        dprCap: 2.0, targetFps: 60 },
-  1: { name: 'drift',  renderScale: 0.90, bloomScale: 0.25, blurIter: 2,
-       fxaa: true, ao: true, autoExposure: true, depthFx: true, extraSamples: 12,
-       dprCap: 1.5, targetFps: 60 },
+  // [不降画质提速] 移动端快速路径：renderScale 锁 1.0（不再偷偷降到 0.6 糊屏），
+  // 关掉 AO/自动曝光/深度模糊三大最贵全屏 pass，模糊 2→1 轮，采样 12→4。
+  // 不降贴图、不降视距、不降分辨率——只砍无效滤镜开销，画面反而更清晰锐利。
+  1: { name: 'drift',  renderScale: 1.00, bloomScale: 0.20, blurIter: 1,
+       fxaa: false, ao: false, autoExposure: false, depthFx: false, extraSamples: 4,
+       dprCap: 1.5, targetFps: 30 },
   2: { name: 'ember',  renderScale: 0.75, bloomScale: 0.20, blurIter: 1,
        fxaa: false, ao: false, autoExposure: false, depthFx: false, extraSamples: 4,
        dprCap: 1.0, targetFps: 30 },
@@ -341,6 +344,9 @@ export class NovaRenderer {
     this.tier = opts.tier ?? 1;
     this.cfg = NOVA_TIERS[this.tier];
     this.enabled = opts.enabled !== false;
+    // [不降画质提速] 移动端 tier1/2 锁死分辨率：禁掉那套把 sceneRT 一路降到
+    // 0.6× 的自适应（糊屏真凶）。桌面 tier0 保留自适应以护住极限帧率。
+    this.lockScale = opts.lockScale !== undefined ? opts.lockScale : (this.tier > 0);
     this.governor = new FrameGovernor(this.tier, opts);
     this.size = new THREE.Vector2(1, 1);
     this._phys = new THREE.Vector2(1, 1);
@@ -433,8 +439,9 @@ export class NovaRenderer {
     const phys = this.renderer.getDrawingBufferSize(this._phys);
     this._lastPhys.set(phys.x, phys.y);
     // getDrawingBufferSize 已含 dpr；若调用方给了更准的值则取物理尺寸
-    const W = Math.max(2, Math.round((phys.x || cssW * this.dpr) * this.cfg.renderScale * this.governor.scale));
-    const H = Math.max(2, Math.round((phys.y || cssH * this.dpr) * this.cfg.renderScale * this.governor.scale));
+    const adr = this.lockScale ? 1 : this.governor.scale;
+    const W = Math.max(2, Math.round((phys.x || cssW * this.dpr) * this.cfg.renderScale * adr));
+    const H = Math.max(2, Math.round((phys.y || cssH * this.dpr) * this.cfg.renderScale * adr));
     this.size.set(W, H);
     const q = Math.max(2, Math.round(W * this.cfg.bloomScale));
     const r = Math.max(2, Math.round(H * this.cfg.bloomScale));
@@ -480,6 +487,7 @@ export class NovaRenderer {
   setTier(t) {
     if (!NOVA_TIERS[t] || t === this.tier) return;
     this.tier = t; this.cfg = NOVA_TIERS[t];
+    this.lockScale = t > 0;   // tier1/2 恒锁分辨率
     this.mComposite.uniforms.uAutoExposure.value = this.cfg.autoExposure ? 1 : 0;
     this.mComposite.uniforms.uFxaa.value = this.cfg.fxaa ? 1 : 0;
     this.mComposite.uniforms.uDepthFx.value = this.cfg.depthFx ? 1 : 0;
@@ -497,12 +505,14 @@ export class NovaRenderer {
       r.setRenderTarget(null); r.render(scene, camera); return;
     }
     try {
-      const changed = this.governor.tick(frameMs);
-      // 自适应 DPR / 旋转屏 / 系统缩放都会改 drawingBuffer 尺寸；
-      // 这里自动对齐，避免 RT 与画布错配导致拉伸或半屏。
+      // [不降画质提速] 锁定时不采纳 governor 的降分辨率信号（它就是糊屏+反复
+      // 重建 RT 卡顿的源头）；physChanged 仅真实旋转/缩放屏才触发，加 1px 容差
+      // 防止浮点抖动导致每帧重建。
+      const adrChanged = this.lockScale ? false : this.governor.tick(frameMs);
       r.getDrawingBufferSize(this._phys);
-      const physChanged = this._phys.x !== this._lastPhys.x || this._phys.y !== this._lastPhys.y;
-      if (changed || physChanged) this.setSize(this.size.x, this.size.y, this.dpr);
+      const physChanged = Math.abs(this._phys.x - this._lastPhys.x) > 1 ||
+                          Math.abs(this._phys.y - this._lastPhys.y) > 1;
+      if (adrChanged || physChanged) this.setSize(this.size.x, this.size.y, this.dpr);
       this.frame++;
       this.passes = 0;
 

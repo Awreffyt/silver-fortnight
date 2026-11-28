@@ -10,7 +10,7 @@ import { RenderPass } from 'three/addons/postprocessing/RenderPass.js';
 import { UnrealBloomPass } from 'three/addons/postprocessing/UnrealBloomPass.js';
 import { OutputPass } from 'three/addons/postprocessing/OutputPass.js';
 // [a7t] NOVA 自研光影管线：移动端全档常开，动态分辨率守帧
-import { NovaRenderer, novaTierFor, NOVA_TIERS, ADR_STEPS, FrameGovernor } from './nova_render.js?v=a7t';
+import { NovaRenderer, novaTierFor, NOVA_TIERS, ADR_STEPS, FrameGovernor } from './nova_render.js?v=a7perf1';
 import { tryMountUrban } from './miami_layer.js?v=a7look28';
 // [LCR] 光锥光追增强层（双后端：无 WebGPU 自动降级为纯光栅化，画面不变）
 import { LCRBridge } from './lcr_bridge.js?v=lcr1';
