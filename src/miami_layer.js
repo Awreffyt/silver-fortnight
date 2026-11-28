@@ -405,6 +405,20 @@ export class ChunkedUrbanLayer {
           }
         } catch (e) { /* 记账失败不影响渲染 */ }
       });
+      // [七彩斑纹根治] THREE.TextureLoader.load 返回的 Texture 在图片就绪前没有
+      // image，材质却立刻绑定它。建筑区块边走边加载，空纹理被 GPU 采样的窗口期
+      // 很长 —— 真机上读到未初始化显存就是诡异的七彩斑纹/彩噪。先塞一张 1×1
+      // 中性占位图：加载完成 three 会自动把 image 覆盖成真实图，不影响最终画质；
+      // 加载期间显示的是中性色而不是花屏。法线贴图用中性法线色(128,128,255)。
+      try {
+        const ph = document.createElement('canvas');
+        ph.width = ph.height = 1;
+        const pc = ph.getContext('2d');
+        pc.fillStyle = /Normal|BakedN/i.test(f) ? 'rgb(128,128,255)' : 'rgb(190,186,178)';
+        pc.fillRect(0, 0, 1, 1);
+        t.image = ph;
+        t.needsUpdate = true;
+      } catch (e) { /* 占位失败不致命，退回原行为 */ }
       t.wrapS = t.wrapT = THREE.RepeatWrapping;
       // [贴图慢修复] anisotropy 8→4：各向异性过滤是采样开销大头，
       // 手机端 4 已足够清晰（透视地面/立面），桌面端保持 8。
